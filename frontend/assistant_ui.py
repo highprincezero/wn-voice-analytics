@@ -74,7 +74,7 @@ textarea, input, select { font-size: 16px !important; }
 }
 .step.done { background: #e5f6ea; border-color: #1f8a4c; color: #146c3a; }
 .step.current {
-  background: #fff; border-color: #b42318; color: #9f1c14;
+  background: #fde8e8; border-color: #b42318; color: #9f1c14;
   animation: step-pulse 1.4s ease-in-out infinite;
 }
 .step.skipped { background: #f7f7f7; color: #8a9399; border-style: dashed; }
@@ -506,14 +506,6 @@ def render_assistant(api: ApiClient, sample_path: Path) -> None:
     chosen = _choose(scoped)
     if chosen is not None:
         st.session_state["assistant_selected"] = chosen["id"]
-    st.markdown(_flow_html(chosen), unsafe_allow_html=True)
-    if len(scoped) > 1:
-        for item in scoped:
-            label = f"{item['original_filename']} · {_status_label(item)}"
-            kind = "primary" if chosen and item["id"] == chosen["id"] else "secondary"
-            if st.button(label, key=f"pick-{item['id']}", type=kind):
-                st.session_state["assistant_selected"] = item["id"]
-                st.rerun()
     show_log = bool(st.session_state.get("show_live_log"))
     log_markup = _log_html(events)
     if show_log:
@@ -527,6 +519,14 @@ def render_assistant(api: ApiClient, sample_path: Path) -> None:
         main_col = st.container()
         log_col = None
     with main_col:
+        st.markdown(_flow_html(chosen), unsafe_allow_html=True)
+        if len(scoped) > 1:
+            for item in scoped:
+                label = f"{item['original_filename']} · {_status_label(item)}"
+                kind = "primary" if chosen and item["id"] == chosen["id"] else "secondary"
+                if st.button(label, key=f"pick-{item['id']}", type=kind):
+                    st.session_state["assistant_selected"] = item["id"]
+                    st.rerun()
         st.markdown(
             f'<div class="chat-scroll">{_bubbles(st.session_state["assistant_messages"])}</div>',
             unsafe_allow_html=True,
