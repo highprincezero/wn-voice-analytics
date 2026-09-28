@@ -1,0 +1,28 @@
+flowchart TB
+  users[Clients] --> fd[Azure Front Door]
+  fd --> r1[Region 1]
+  fd --> rn[Region N]
+
+  subgraph regionBox [Each region]
+    apim[API Management]
+    api[API replicas min 2 max 8]
+    queues[Queues transcription llm layer2 rollup]
+    workers[Service Bus workers]
+    rollup[Cron rollup job]
+    db[(Postgres 16 hash partitions)]
+    blob[(Blob keys under user id)]
+    oai[Azure OpenAI and Content Safety]
+    obs[Log Analytics and Langfuse]
+  end
+
+  r1 --> apim
+  rn --> apim
+  apim --> api
+  api --> queues
+  queues --> workers
+  workers --> db
+  workers --> blob
+  workers --> oai
+  rollup --> db
+  api --> obs
+  workers --> obs

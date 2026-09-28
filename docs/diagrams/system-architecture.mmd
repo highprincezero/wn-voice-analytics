@@ -1,0 +1,42 @@
+flowchart TB
+  subgraph interfaceLayer [Interface layer]
+    UI[Streamlit client]
+  end
+
+  subgraph implementationLayer [Implementation layer]
+    FD[Azure Front Door]
+    APIM[API Management]
+    API[FastAPI and JWT]
+    SB[Service Bus queues]
+    WK[Container Apps workers]
+    JOB[Scheduled rollup job]
+    PG[(PostgreSQL hash partitions)]
+    BLOB[(Blob storage)]
+    CACHE[(Redis cache)]
+    OBS[App Insights and OpenTelemetry]
+  end
+
+  subgraph intelligenceLayer [Intelligence layer]
+    LG[LangGraph pipeline]
+    STT[gpt-4o-transcribe]
+    LLM[gpt-4.1-mini structured output]
+    CS[Content Safety Prompt Shields]
+    FEAT[RMS energy and spaCy]
+  end
+
+  UI --> FD --> APIM --> API
+  API --> PG
+  API --> BLOB
+  API --> SB
+  API --> CACHE
+  SB --> WK
+  JOB --> PG
+  WK --> LG
+  LG --> STT
+  LG --> CS
+  LG --> LLM
+  LG --> FEAT
+  WK --> PG
+  WK --> BLOB
+  API --> OBS
+  WK --> OBS

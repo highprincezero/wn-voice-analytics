@@ -1,0 +1,26 @@
+name_prefix         = "vanpoc01"
+global_location     = "eastus"
+db_admin_password   = "replace-with-a-url-safe-password"
+jwt_secret          = "replace-with-a-long-random-secret"
+api_image           = "ghcr.io/highprincezero/wn-voice-analytics-api:latest"
+worker_image        = "ghcr.io/highprincezero/wn-voice-analytics-api:latest"
+
+# Add or remove objects to change N. Keep subnet ranges disjoint.
+regions = [
+  {
+    name            = "eus"
+    location        = "eastus"
+    cidr            = "10.10.0.0/16"
+    apps_subnet     = "10.10.0.0/23"
+    data_subnet     = "10.10.2.0/24"
+    openai_location = "eastus"
+  },
+  {
+    name            = "weu"
+    location        = "westeurope"
+    cidr            = "10.20.0.0/16"
+    apps_subnet     = "10.20.0.0/23"
+    data_subnet     = "10.20.2.0/24"
+    openai_location = "westeurope"
+  },
+]

@@ -1,0 +1,108 @@
+name: voice-analytics
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://voice:voice@postgres:5432/voice
+  JWT_SECRET: dev-only-secret-change-me-please
+  JWT_EXPIRE_MINUTES: "1440"
+  LLM_PROVIDER: mock
+  SAFETY_PROVIDER: mock
+  BLOB_PROVIDER: azurite
+  ANALYSIS_MODE: celery
+  BROKER: celery
+  AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
+  AZURE_STORAGE_CONTAINER: voice
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  ROLLUP_SCHEDULE_SECONDS: "900"
+  OTEL_ENABLED: "false"
+  HOME_REGION: local
+  CHUNK_CHARS: "4000"
+  PYTHONUNBUFFERED: "1"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: voice
+      POSTGRES_PASSWORD: voice
+      POSTGRES_DB: voice
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice -d voice"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --location /data --debug /data/debug.log
+    ports:
+      - "10000:10000"
+    volumes:
+      - azurite:/data
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./backend
+    command: celery -A app.jobs.celery_app worker --beat --loglevel=info --concurrency=2
+    environment:
+      <<: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      API_BASE_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  azurite:
