@@ -1,6 +1,6 @@
 # Demo script
 
-Screen recording, about 6 minutes. Record the Streamlit app at http://localhost:8501 after `docker compose up --build`. Use a window around 440 pixels wide so the phone layout is obvious, or record a desktop window and say the layout is capped for a phone.
+Screen recording, about 8 minutes. Record the Streamlit app at http://localhost:8501 after `docker compose up --build`. Use a window around 440 pixels wide so the phone layout is obvious, or record a desktop window and say the layout is capped for a phone. Open the sidebar when the script reaches Assistant mode.
 
 Before you start:
 
@@ -77,12 +77,36 @@ Show the overall summary and a few groups (budget, dentist, and an upcoming line
 
 Say: the same function runs every 15 minutes for each user who has completed analyses. Locally that is Celery beat. In Azure it is a Container Apps Job. Grouping can also be all of my files, week, or sentiment. Long sets of summaries are map-reduced so the rollup stays inside the chunk budget.
 
-## 5:30 – 6:20  Account, isolation, and how it scales
+## 5:30 – 7:00  Assistant mode
+
+Open the sidebar and choose **Assistant**. Classic stays available when you switch back.
+
+The first message asks for one recording or a set of up to ten. Click **Use bundled sample**.
+
+Say: this is the same upload limit as the Upload page. The file is attached inside the chat, then the bot lists it back.
+
+Check **Lexicon sentiment** and **Speaking pace**. Click **Save options and start processing**.
+
+Say: those choices are saved with the same prompt-config API as the Prompts page. The upload uses the same files endpoint. The next line says processing has started.
+
+Wait for the result card. Read the summary, one professional topic, one personal topic, an upcoming line, and the Layer 2 caption.
+
+In the chat box, ask: what upcoming events did I mention this week?
+
+Read the reply. It should name an upcoming line from the card, such as Friday or Tuesday.
+
+Ask: summarize my files by topic.
+
+Say: that question calls `POST /api/v1/chat`. A small LangGraph agent can search this user's files, open one analysis, or run the same rollup job. In mock mode the choice is a fixed rule, and it still runs the tool. The question is checked for prompt injection before the graph runs. The agent never sees another user's rows. The transcript is not pasted into the tool result. Chat history stays in this browser session.
+
+Switch the sidebar back to **Classic** and open Rollup if you want to show that the topic summary was stored with trigger `on_demand`.
+
+## 7:00 – 7:40  Account, isolation, and how it scales
 
 Open Account. Show the email, the user id, and home region `local`.
 
 Say: every audio row, transcript, analysis, prompt config, and rollup is keyed by this user id. Postgres hash-partitions those tables into 16 buckets. Another account gets a 404 for this file id. Blob keys that do not start with `users/{this user id}/` are rejected.
 
-Close on the architecture in one sentence: N regions, each sized for 10,000 registered users and 2,000 concurrent users, Front Door in front, and no cross-region read of audio on the request path. The planning case is about half a file per second per region at peak, which fits the worker replica range in the Terraform module.
+Close on the architecture in one sentence: N regions, each sized for 10,000 registered users and 2,000 concurrent users, Front Door in front of API Management, then the API, and no cross-region read of audio on the request path. The planning case is about half a file per second per region at peak, which fits the worker replica range in the Terraform module. API Management Basic rate-limits each token's `sub` claim, and the API repeats that limit in Redis.
 
 Optional last line, if you have ten seconds: the tests cover auth, upload, the mock pipeline, partition SQL, the rollup, and the guardrails, and GitHub Actions also validates the Terraform.

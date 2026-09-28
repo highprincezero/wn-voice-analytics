@@ -9,24 +9,25 @@ Voice Analytics has three layers. The interface is a narrow Streamlit client. Th
 ```mermaid
 flowchart TB
   subgraph interfaceLayer [Interface layer]
-    UI[Streamlit client]
+    UI[Streamlit classic and assistant]
   end
 
   subgraph implementationLayer [Implementation layer]
     FD[Azure Front Door]
-    APIM[API Management]
-    API[FastAPI and JWT]
+    APIM[API Management Basic JWT and per-user limit]
+    API[FastAPI JWT and Redis rate limit]
     SB[Service Bus queues]
     WK[Container Apps workers]
     JOB[Scheduled rollup job]
-    PG[(PostgreSQL hash partitions)]
-    BLOB[(Blob storage)]
-    CACHE[(Redis cache)]
+    PG[(PostgreSQL zone-redundant HA)]
+    BLOB[(Blob storage GZRS)]
+    CACHE[(Redis cache and rate limit)]
     OBS[App Insights and OpenTelemetry]
   end
 
   subgraph intelligenceLayer [Intelligence layer]
-    LG[LangGraph pipeline]
+    LG[LangGraph analysis pipeline]
+    CHAT[LangGraph chat agent]
     STT[gpt-4o-transcribe]
     LLM[gpt-4.1-mini structured output]
     CS[Content Safety Prompt Shields]
@@ -34,10 +35,13 @@ flowchart TB
   end
 
   UI --> FD --> APIM --> API
+  API --> CHAT
   API --> PG
   API --> BLOB
   API --> SB
   API --> CACHE
+  CHAT --> CS
+  CHAT --> LLM
   SB --> WK
   JOB --> PG
   WK --> LG
@@ -54,6 +58,32 @@ flowchart TB
 Source: [diagrams/system-architecture.mmd](diagrams/system-architecture.mmd). SVG: [diagrams/system-architecture.svg](diagrams/system-architecture.svg).
 
 The browser talks only to Streamlit. Streamlit calls FastAPI with the bearer token. That keeps auth and file bytes on the server side of the UI.
+
+Classic mode is the library, upload, prompt, rollup, and account pages. Assistant mode is a chat on the same client. The sidebar switches between them. Upload, prompt configuration, and file status in the chat use the existing HTTP APIs. Follow-up questions use `POST /api/v1/chat`.
+
+## Request path in Azure
+
+Front Door is the public entry. Each origin is a regional API Management gateway, not the Container App. API Management checks `X-Azure-FDID` against the Front Door profile id, validates the HS256 JWT on authenticated routes, and applies `rate-limit-by-key` with the token's `sub` claim. A limit breach returns 429. Public routes (health, meta, sign-up, login, and the Layer 2 catalog) skip JWT validation and are limited per source IP.
+
+The Container App ingress allowlists API Management's public IP addresses, so the app hostname does not accept traffic from the rest of the internet. API Management Basic cannot be placed in a virtual network, and Front Door Standard cannot private-link to that gateway. The IP allowlist plus the Front Door header is the lock this tier can actually enforce. Private Link would mean API Management Premium and Front Door Premium.
+
+The API applies the same per-user limit again in Redis. That counter is what Compose uses, and it still applies in Azure if a request reaches the app.
+
+## Chat agent
+
+The chat route builds a LangGraph with three nodes: plan, tools, and compose. The tool set is fixed:
+
+| Tool | What it does |
+| --- | --- |
+| `search_files` | The caller's files, filtered by date, duration, or taxonomy text |
+| `get_analysis` | One file's summary, taxonomy, and Layer 2 results |
+| `run_summary` | The same on-demand rollup as `POST /api/v1/summaries` |
+
+`user_id` comes from the JWT. It is not a tool argument. A file id that belongs to someone else is `not_found`. The tools do not return the raw transcript. Summaries and taxonomy are the data the reply is allowed to use.
+
+When `LLM_PROVIDER=mock`, the plan node matches the question to one tool with fixed rules, the tools node runs it, and the compose node writes a deterministic reply from the tool result. When `LLM_PROVIDER=azure`, the plan node asks `gpt-4.1-mini` for one tool call and the compose node asks for a JSON object `{"reply": "..."}`, which Pydantic checks. A schema failure falls back to the same rule-based reply. One tool runs per question.
+
+Streamlit keeps the transcript of the chat in session state and sends at most the last eight turns. The server does not store that history.
 
 ## Analysis pipeline
 
@@ -89,9 +119,11 @@ flowchart TD
 | API | Uvicorn container | Container App, min 2, max 8 |
 | Queue | Redis + Celery, worker started with beat | Service Bus queues and a Container App worker |
 | Schedule | Celery beat inside the worker | Container Apps Job, cron `*/15 * * * *` |
-| Objects | Azurite | Azure Blob, ZRS, private container |
-| Database | Postgres 16 | Flexible Server 16, hash partitions |
+| Objects | Azurite | Azure Blob, GZRS, private container |
+| Database | Postgres 16 | Flexible Server 16, zone-redundant HA, geo-redundant backups, hash partitions |
 | Models | Mock providers, no keys | Azure OpenAI and Content Safety |
+| Edge | none | Front Door to API Management Basic, then the Container App |
+| Rate limit | Redis in Compose | API Management per `sub`, and Redis again in the API |
 | Traces | OpenTelemetry off unless configured | OpenTelemetry on; Langfuse when keys exist |
 
 `ANALYSIS_MODE=inline` runs the pipeline in the API process. Tests use that mode. Compose uses `celery`. Production sets `BROKER=servicebus`, and the API publishes `{kind, file_id, user_id}` to the `transcription` queue. The worker process `python -m app.jobs.service_bus_worker` consumes `transcription`, `llm-layer1`, `llm-layer2`, and `rollup`.

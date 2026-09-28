@@ -31,8 +31,14 @@ Secrets (JWT, database URL, storage connection string, Service Bus, OpenAI key, 
 
 ## What each region gets
 
-Resource group, VNet, an apps subnet delegated to Container Apps, a data subnet delegated to Postgres Flexible Server, private DNS zone `privatelink.postgres.database.azure.com`, Postgres 16 (`GP_Standard_D4ds_v5`, 128 GB, public access off), a ZRS storage account with a private `voice` container, Redis Standard C1, Key Vault (RBAC), Service Bus Standard with queues `transcription`, `llm-layer1`, `llm-layer2`, and `rollup`, Log Analytics, Application Insights, a Cognitive Services OpenAI account (`gpt-4o-transcribe`, `gpt-4.1-mini`) and a Content Safety account, a Container Apps environment, the API (min 2, max 8, external ingress on port 8000), the worker (min 1, max 20), the rollup job, and API Management Consumption.
+Resource group, VNet, an apps subnet delegated to Container Apps (`/23`, the consumption-only minimum), a data subnet delegated to Postgres Flexible Server, private DNS zone `privatelink.postgres.database.azure.com`, Postgres 16 (`GP_Standard_D4ds_v5`, 128 GB, public access off, zone-redundant high availability in zones 1 and 2, geo-redundant backups), a GZRS storage account with a private `voice` container, Redis Standard C1, Key Vault (RBAC), Service Bus Standard with queues `transcription`, `llm-layer1`, `llm-layer2`, and `rollup`, Log Analytics, Application Insights, a Cognitive Services OpenAI account (`gpt-4o-transcribe`, `gpt-4.1-mini`) and a Content Safety account, a zone-redundant Container Apps environment, the API (min 2, max 8, external ingress on port 8000, allowlisted to API Management), the worker (min 1, max 20), the rollup job, and API Management Basic.
+
+API Management publishes the API at the gateway root and forwards to the Container App. The policy requires the Front Door id header, validates the HS256 JWT on authenticated routes, and rate-limits by the `sub` claim (`apim_user_rate_limit` per `apim_rate_window_seconds`, default 120 per 60). Sign-up, login, health, meta, and the prompt catalog skip the JWT check and are limited per source IP. The JWT named value is the base64 form of `jwt_secret`, which is what the gateway expects for HMAC. The API container gets the same numeric limit in Redis.
+
+`rate-limit-by-key` is not supported on the Consumption tier. Basic is the tier in this module. Service Bus and Redis stay on Standard. None of those three move to Premium for zones. See `docs/scaling.md`.
+
+Regions must support availability zones 1 and 2, GZRS, and zone-redundant Postgres HA together with geo-redundant backup. The default regions, eastus and westeurope, do.
 
 ## Global
 
-One resource group in `global_location` holds a Front Door Standard profile. Each regional API hostname is an origin. Add a region by appending an object to `regions` with a non-overlapping CIDR. Remove a region by deleting that object. There is no shared database between them.
+One resource group in `global_location` holds a Front Door Standard profile. Each origin is the regional API Management gateway hostname, with a health probe on `/api/v1/health`. Add a region by appending an object to `regions` with a non-overlapping CIDR. Remove a region by deleting that object. There is no shared database between them.

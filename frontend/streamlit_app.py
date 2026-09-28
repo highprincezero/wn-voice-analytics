@@ -6,8 +6,14 @@ from pathlib import Path
 
 import streamlit as st
 from api_client import ApiClient, ApiError
+from assistant_ui import render_assistant
 
-st.set_page_config(page_title="Voice Analytics", page_icon="🎙", layout="centered")
+st.set_page_config(
+    page_title="Voice Analytics",
+    page_icon="🎙",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 st.markdown(
     """
     <style>
@@ -60,6 +66,10 @@ if meta["llm_provider"] == "mock":
 else:
     st.caption(f"Providers: {meta['llm_provider']} / {meta['safety_provider']}.")
 
+with st.sidebar:
+    st.radio("Mode", ["Classic", "Assistant"], key="ui_mode")
+    st.caption("Classic is the library, upload, prompts, rollup, and account pages.")
+
 if not st.session_state.get("token"):
     login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
     with login_tab:
@@ -88,6 +98,10 @@ if not st.session_state.get("token"):
                     st.session_state["token"] = body["access_token"]
                     st.session_state["goto"] = "Prompts"
                     st.rerun()
+    st.stop()
+
+if st.session_state.get("ui_mode") == "Assistant":
+    render_assistant(client(), SAMPLE_PATH)
     st.stop()
 
 page = st.radio(

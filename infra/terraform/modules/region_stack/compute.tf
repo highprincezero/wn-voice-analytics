@@ -1,5 +1,10 @@
 locals {
   database_url = "postgresql+psycopg://voiceadmin:${var.db_admin_password}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/voice?sslmode=require"
+  redis_url    = "rediss://:${urlencode(azurerm_redis_cache.this.primary_access_key)}@${azurerm_redis_cache.this.hostname}:${azurerm_redis_cache.this.ssl_port}/0"
+  apim_allow_cidrs = [
+    for ip in azurerm_api_management.this.public_ip_addresses :
+    strcontains(ip, "/") ? ip : "${ip}/32"
+  ]
 }
 
 resource "azurerm_container_app_environment" "this" {
@@ -8,6 +13,7 @@ resource "azurerm_container_app_environment" "this" {
   resource_group_name        = azurerm_resource_group.this.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
   infrastructure_subnet_id   = azurerm_subnet.apps.id
+  zone_redundancy_enabled    = true
 }
 
 resource "azurerm_container_app" "api" {
@@ -43,6 +49,10 @@ resource "azurerm_container_app" "api" {
   secret {
     name  = "safety-key"
     value = azurerm_cognitive_account.safety.primary_access_key
+  }
+  secret {
+    name  = "redis-url"
+    value = local.redis_url
   }
 
   template {
@@ -131,6 +141,26 @@ resource "azurerm_container_app" "api" {
         name  = "OTEL_SERVICE_NAME"
         value = "voice-analytics-api-${var.region_name}"
       }
+      env {
+        name        = "REDIS_URL"
+        secret_name = "redis-url"
+      }
+      env {
+        name  = "RATE_LIMIT_ENABLED"
+        value = "true"
+      }
+      env {
+        name  = "RATE_LIMIT_BACKEND"
+        value = "redis"
+      }
+      env {
+        name  = "RATE_LIMIT_REQUESTS"
+        value = tostring(var.apim_user_rate_limit)
+      }
+      env {
+        name  = "RATE_LIMIT_WINDOW_SECONDS"
+        value = tostring(var.apim_rate_window_seconds)
+      }
     }
   }
 
@@ -142,6 +172,16 @@ resource "azurerm_container_app" "api" {
     traffic_weight {
       percentage      = 100
       latest_revision = true
+    }
+
+    dynamic "ip_security_restriction" {
+      for_each = { for index, cidr in local.apim_allow_cidrs : index => cidr }
+      content {
+        name             = "apim-${ip_security_restriction.key}"
+        action           = "Allow"
+        ip_address_range = ip_security_restriction.value
+        description      = "API Management outbound"
+      }
     }
   }
 }
@@ -299,13 +339,15 @@ resource "azurerm_container_app_job" "rollup" {
   }
 }
 
+# Basic supports rate-limit-by-key. Consumption does not.
+# Premium would add zones and a virtual network. This rate fits one Basic unit.
 resource "azurerm_api_management" "this" {
   name                = "apim-${var.name_prefix}-${var.region_name}"
   location            = azurerm_resource_group.this.location
   resource_group_name = azurerm_resource_group.this.name
   publisher_name      = "Voice Analytics"
   publisher_email     = "platform@example.com"
-  sku_name            = "Consumption_0"
+  sku_name            = "Basic_1"
 }
 
 resource "azurerm_api_management_api" "voice" {
@@ -314,7 +356,70 @@ resource "azurerm_api_management_api" "voice" {
   api_management_name   = azurerm_api_management.this.name
   revision              = "1"
   display_name          = "Voice Analytics"
-  path                  = "voice"
+  path                  = ""
   protocols             = ["https"]
+  service_url           = "https://${azurerm_container_app.api.ingress[0].fqdn}"
   subscription_required = false
+}
+
+resource "azurerm_api_management_api_operation" "proxy" {
+  for_each            = toset(["GET", "POST", "PUT", "DELETE", "PATCH"])
+  operation_id        = "proxy-${lower(each.value)}"
+  api_name            = azurerm_api_management_api.voice.name
+  api_management_name = azurerm_api_management.this.name
+  resource_group_name = azurerm_resource_group.this.name
+  display_name        = "Proxy ${each.value}"
+  method              = each.value
+  url_template        = "/{*path}"
+
+  template_parameter {
+    name     = "path"
+    required = true
+    type     = "string"
+  }
+}
+
+resource "azurerm_api_management_api_operation" "root" {
+  operation_id        = "root-get"
+  api_name            = azurerm_api_management_api.voice.name
+  api_management_name = azurerm_api_management.this.name
+  resource_group_name = azurerm_resource_group.this.name
+  display_name        = "Root"
+  method              = "GET"
+  url_template        = "/"
+}
+
+resource "azurerm_api_management_named_value" "jwt_secret" {
+  name                = "jwt-secret"
+  resource_group_name = azurerm_resource_group.this.name
+  api_management_name = azurerm_api_management.this.name
+  display_name        = "jwt-secret"
+  secret              = true
+  value               = base64encode(var.jwt_secret)
+}
+
+resource "azurerm_api_management_named_value" "front_door_id" {
+  name                = "front-door-id"
+  resource_group_name = azurerm_resource_group.this.name
+  api_management_name = azurerm_api_management.this.name
+  display_name        = "front-door-id"
+  secret              = true
+  value               = var.front_door_id
+}
+
+resource "azurerm_api_management_api_policy" "voice" {
+  api_name            = azurerm_api_management_api.voice.name
+  api_management_name = azurerm_api_management.this.name
+  resource_group_name = azurerm_resource_group.this.name
+  xml_content = templatefile("${path.module}/apim_policy.xml.tftpl", {
+    user_calls  = var.apim_user_rate_limit
+    user_period = var.apim_rate_window_seconds
+    anon_calls  = var.apim_anonymous_rate_limit
+    anon_period = var.apim_rate_window_seconds
+  })
+
+  depends_on = [
+    azurerm_api_management_named_value.jwt_secret,
+    azurerm_api_management_named_value.front_door_id,
+  ]
 }

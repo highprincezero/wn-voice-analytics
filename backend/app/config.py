@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     service_bus_connection_string: str = ""
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    redis_url: str = ""
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = 120
+    rate_limit_window_seconds: int = 60
+    rate_limit_backend: str = "redis"
     rollup_schedule_seconds: int = 900
 
     langfuse_public_key: str = ""

@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.api.rate_limit import RateLimiterUnavailable, consume
 from app.auth.security import AuthError, decode_access_token
 from app.db.models import User
 from app.db.session import get_db
@@ -24,6 +25,16 @@ def get_current_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        allowed, retry_after = consume(str(user.id))
+    except RateLimiterUnavailable as exc:
+        raise HTTPException(status_code=503, detail="rate limiter unavailable") from exc
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded",
+            headers={"Retry-After": str(max(1, retry_after))},
+        )
     return user
 
 

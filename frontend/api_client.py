@@ -88,3 +88,10 @@ class ApiClient:
 
     def list_summaries(self) -> dict:
         return self._request("GET", "/api/v1/summaries").json()
+
+    def chat(self, message: str, history: list[dict]) -> dict:
+        return self._request(
+            "POST",
+            "/api/v1/chat",
+            json={"message": message, "history": history},
+        ).json()

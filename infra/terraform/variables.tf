@@ -28,6 +28,24 @@ variable "api_image" {
   default     = "ghcr.io/highprincezero/wn-voice-analytics-api:latest"
 }
 
+variable "apim_user_rate_limit" {
+  description = "Authenticated API Management calls per user per window, keyed on the JWT sub claim."
+  type        = number
+  default     = 120
+}
+
+variable "apim_anonymous_rate_limit" {
+  description = "Unauthenticated API Management calls per source IP per window."
+  type        = number
+  default     = 60
+}
+
+variable "apim_rate_window_seconds" {
+  description = "Rate-limit window for API Management and the in-process Redis limiter."
+  type        = number
+  default     = 60
+}
+
 variable "worker_image" {
   description = "Container image for workers and the scheduled rollup job."
   type        = string

@@ -13,6 +13,8 @@ os.environ["LANGFUSE_SECRET_KEY"] = ""
 os.environ["AZURE_STORAGE_CONTAINER"] = "voice"
 os.environ["HOME_REGION"] = "local"
 os.environ["CHUNK_CHARS"] = "4000"
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+os.environ["RATE_LIMIT_BACKEND"] = "memory"
 
 import pytest
 from fastapi.testclient import TestClient

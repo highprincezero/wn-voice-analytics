@@ -133,6 +133,54 @@ Only analyses with status `completed` are included.
 
 `{"items": [ ... ]}`, newest first, at most 50. Scheduled runs have `trigger` `schedule`.
 
+## Chat
+
+### POST /api/v1/chat
+
+```json
+{
+  "message": "what upcoming events did I mention this week?",
+  "history": [
+    {"role": "user", "content": "Attached 1 file(s): sample_call.wav."},
+    {"role": "assistant", "content": "Processing has started for 1 file(s): sample_call.wav."}
+  ]
+}
+```
+
+`message` is 1 to 2000 characters. `history` is optional, at most 8 turns, each `role` of `user` or `assistant`. Extra fields, including a `user_id`, are rejected with `422`. The server uses the JWT subject and ignores any identity in the body.
+
+`200`:
+
+```json
+{
+  "reply": "Upcoming events:\nsample_call.wav: Please send the notes by Friday.",
+  "tool_calls": [
+    {
+      "name": "search_files",
+      "arguments": {"date_from": "2026-09-28T00:00:00"},
+      "result": {
+        "total": 1,
+        "items": [
+          {
+            "id": "<uuid>",
+            "filename": "sample_call.wav",
+            "taxonomy": {"upcoming_events": ["Please send the notes by Friday."]}
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`tool_calls` has at most one entry. `name` is `search_files`, `get_analysis`, or `run_summary`. `search_files` accepts `date_from`, `date_to`, `min_duration`, `max_duration`, and `taxonomy`. `get_analysis` accepts `file_id`. `run_summary` accepts `group_by` (`user`, `taxonomy_label`, `week`, `sentiment`) and optional times. A miss, including another user's file id, is `result.error` of `not_found` and a reply that says the recording is not on this account.
+
+`400` when content safety blocks the message or any history turn. `401` without a token.
+
+With `LLM_PROVIDER=mock` the plan step is a fixed set of rules. "what upcoming events did I mention this week?" calls `search_files` with the start of the current week. "summarize my files by topic" calls `run_summary` with `group_by` `taxonomy_label`. A question that names a file UUID calls `get_analysis`. The reply is built from the tool result, not from a model.
+
+Authenticated routes, including this one, are also counted by the per-user rate limit. Over the limit is `429` with a `Retry-After` header and `{"detail": "rate limit exceeded"}`. Health, sign-up, login, meta, and the prompt catalog are not counted.
+
 ## Meta
 
 ### GET /api/v1/health

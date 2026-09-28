@@ -1,0 +1,36 @@
+<policies>
+  <inbound>
+    <base />
+    <check-header name="X-Azure-FDID" failed-check-httpcode="403" failed-check-error-message="Forbidden" ignore-case="true">
+      <value>{{front-door-id}}</value>
+    </check-header>
+    <choose>
+      <when condition="@(context.Request.Url.Path == &quot;/&quot; || context.Request.Url.Path == &quot;/api/v1/health&quot; || context.Request.Url.Path == &quot;/api/v1/health/ready&quot; || context.Request.Url.Path == &quot;/api/v1/meta&quot; || context.Request.Url.Path == &quot;/api/v1/prompts/options&quot; || context.Request.Url.Path == &quot;/api/v1/auth/signup&quot; || context.Request.Url.Path == &quot;/api/v1/auth/login&quot;)">
+        <rate-limit-by-key calls="${anon_calls}" renewal-period="${anon_period}" counter-key="@(context.Request.IpAddress)" />
+      </when>
+      <otherwise>
+        <validate-jwt header-name="Authorization" require-scheme="Bearer" output-token-variable-name="jwt">
+          <issuer-signing-keys>
+            <key>{{jwt-secret}}</key>
+          </issuer-signing-keys>
+          <algorithms>
+            <algorithm>HS256</algorithm>
+          </algorithms>
+          <required-claims>
+            <claim name="sub" match="all" />
+          </required-claims>
+        </validate-jwt>
+        <rate-limit-by-key calls="${user_calls}" renewal-period="${user_period}" counter-key="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims[&quot;sub&quot;][0])" />
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

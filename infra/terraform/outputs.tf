@@ -3,6 +3,7 @@ output "regions" {
     for name, region in module.region : name => {
       resource_group = region.resource_group_name
       api_fqdn       = region.api_fqdn
+      apim_gateway   = region.apim_gateway_hostname
       postgres_fqdn  = region.postgres_fqdn
       storage        = region.storage_account_name
     }

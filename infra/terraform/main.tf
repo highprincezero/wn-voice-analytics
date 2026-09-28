@@ -7,17 +7,21 @@ module "region" {
   source   = "./modules/region_stack"
   for_each = { for region in var.regions : region.name => region }
 
-  name_prefix       = var.name_prefix
-  region_name       = each.value.name
-  location          = each.value.location
-  cidr              = each.value.cidr
-  apps_subnet       = each.value.apps_subnet
-  data_subnet       = each.value.data_subnet
-  openai_location   = each.value.openai_location
-  db_admin_password = var.db_admin_password
-  jwt_secret        = var.jwt_secret
-  api_image         = var.api_image
-  worker_image      = var.worker_image
+  name_prefix               = var.name_prefix
+  region_name               = each.value.name
+  location                  = each.value.location
+  cidr                      = each.value.cidr
+  apps_subnet               = each.value.apps_subnet
+  data_subnet               = each.value.data_subnet
+  openai_location           = each.value.openai_location
+  db_admin_password         = var.db_admin_password
+  jwt_secret                = var.jwt_secret
+  api_image                 = var.api_image
+  worker_image              = var.worker_image
+  front_door_id             = azurerm_cdn_frontdoor_profile.entry.resource_guid
+  apim_user_rate_limit      = var.apim_user_rate_limit
+  apim_anonymous_rate_limit = var.apim_anonymous_rate_limit
+  apim_rate_window_seconds  = var.apim_rate_window_seconds
 }
 
 resource "azurerm_cdn_frontdoor_profile" "entry" {
@@ -39,6 +43,13 @@ resource "azurerm_cdn_frontdoor_origin_group" "api" {
     sample_size                 = 4
     successful_samples_required = 3
   }
+
+  health_probe {
+    interval_in_seconds = 120
+    path                = "/api/v1/health"
+    protocol            = "Https"
+    request_type        = "GET"
+  }
 }
 
 resource "azurerm_cdn_frontdoor_origin" "api" {
@@ -46,8 +57,8 @@ resource "azurerm_cdn_frontdoor_origin" "api" {
 
   name                           = each.key
   cdn_frontdoor_origin_group_id  = azurerm_cdn_frontdoor_origin_group.api.id
-  host_name                      = each.value.api_fqdn
-  origin_host_header             = each.value.api_fqdn
+  host_name                      = each.value.apim_gateway_hostname
+  origin_host_header             = each.value.apim_gateway_hostname
   certificate_name_check_enabled = true
   http_port                      = 80
   https_port                     = 443
