@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app.analysis.progress import append_event
 from app.analysis.service import enqueue_analysis
 from app.api.deps import get_current_user
 from app.config import get_settings
@@ -46,6 +47,8 @@ def _file_item(audio: AudioFile, analysis: Analysis | None) -> dict:
         "byte_size": audio.byte_size,
         "duration_sec": audio.duration_sec,
         "status": audio.status,
+        "stage": audio.stage,
+        "skipped_stages": ["layer1", "layer2"] if audio.status == "blocked" else [],
         "error_message": audio.error_message,
         "created_at": audio.created_at,
         "storage_key": audio.storage_key,
@@ -105,9 +108,13 @@ async def upload_files(
             sha256=hashlib.sha256(data).hexdigest(),
             storage_key=key,
             status="uploaded",
+            stage="upload",
             created_at=utcnow(),
         )
         db.add(audio)
+        db.commit()
+        append_event(db, audio, "File uploaded and saved to blob storage", stage="upload")
+        append_event(db, audio, "Row inserted in Postgres", stage="upload")
         db.commit()
         enqueue_analysis(file_id, user.id)
         db.refresh(audio)
@@ -210,7 +217,9 @@ def reanalyze(
 ) -> dict:
     audio = _owned_file(db, user, file_id)
     audio.status = "uploaded"
+    audio.stage = "upload"
     audio.error_message = None
+    append_event(db, audio, "Analysis re-queued", stage="upload")
     db.commit()
     enqueue_analysis(audio.id, user.id)
     db.refresh(audio)

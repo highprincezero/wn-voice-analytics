@@ -56,9 +56,11 @@ Same body. `200` with the same token object. `401` on a bad email or password.
 { "items": [ { "id": "<uuid>", "status": "uploaded", "storage_key": "users/<user_id>/audio/<file_id>.wav" } ] }
 ```
 
-Each item also includes `original_filename`, `content_type`, `byte_size`, `duration_sec`, `created_at`, `error_message`, and, once analysis has finished in the same request (`ANALYSIS_MODE=inline`), `summary`, `taxonomy`, `layer2`, `summary_strategy`, `provider`, and `block_reason`.
+Each item also includes `original_filename`, `content_type`, `byte_size`, `duration_sec`, `created_at`, `error_message`, `stage`, `skipped_stages`, and, once analysis has finished in the same request (`ANALYSIS_MODE=inline`), `summary`, `taxonomy`, `layer2`, `summary_strategy`, `provider`, and `block_reason`.
 
-The object is written, the row is committed, then analysis is queued. With Celery, the first response usually still says `uploaded`.
+`stage` is the pipeline step the worker last entered: `upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, or `saved`. `status` stays `uploaded`, `processing`, `completed`, `blocked`, or `failed`. A blocked file finishes at `saved` with `skipped_stages` of `layer1` and `layer2`. A failure leaves `stage` on the step that raised.
+
+The object is written, the row is committed, then analysis is queued. With Celery, the first response usually still says `uploaded` or `queued`. `MOCK_STAGE_DELAY_SEC` pauses at each step so a client can poll the change. Tests and Azure leave it at 0.
 
 ### GET /api/v1/files
 
@@ -93,7 +95,30 @@ Sets status back to `uploaded` and queues the pipeline again. Returns the file o
 
 ### DELETE /api/v1/files/{file_id}
 
-`204`. Deletes the audio, transcript, and analysis blobs, then the row. Child rows cascade.
+`204`. Deletes the audio, transcript, and analysis blobs, then the row. Child rows, including the file's events, cascade.
+
+### GET /api/v1/events
+
+Newest first, at most 300. Optional `file_id` limits the list to one of the caller's files. Another user's id returns an empty list.
+
+```json
+{
+  "items": [
+    {
+      "id": "<uuid>",
+      "file_id": "<uuid>",
+      "filename": "sample_call.wav",
+      "message": "Transcribe finished (1400 ms)",
+      "stage": "transcribe",
+      "level": "info",
+      "duration_ms": 1400,
+      "created_at": "2026-09-28T12:00:01"
+    }
+  ]
+}
+```
+
+`level` is `info` or `error`. `duration_ms` is set on stage finish lines. Messages cover the blob write, the Postgres insert, the queue (Celery task id, Service Bus, or inline), worker pickup, each stage start and finish, skipped stages, the saved result, and errors or retries. Transcript text is not copied into the log.
 
 ## Prompts
 

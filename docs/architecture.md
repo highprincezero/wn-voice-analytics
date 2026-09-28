@@ -61,6 +61,8 @@ The browser talks only to Streamlit. Streamlit calls FastAPI with the bearer tok
 
 Classic mode is the library, upload, prompt, rollup, and account pages. Assistant mode is a chat on the same client. The sidebar switches between them. Upload, prompt configuration, and file status in the chat use the existing HTTP APIs. Follow-up questions use `POST /api/v1/chat`.
 
+Assistant keeps a flowchart of the selected file's `stage` (`upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, `saved`). The worker writes that column as each node starts, and `GET /api/v1/files` is what the page polls. A second read, `GET /api/v1/events`, is the live log: blob save, Postgres insert, queue, worker pickup, stage start and finish with duration, save, and errors. The log is limited to the JWT user. `MOCK_STAGE_DELAY_SEC` (1.5 in Compose, 0 in tests) pauses on each step so those updates are visible.
+
 ## Request path in Azure
 
 Front Door is the public entry. Each origin is a regional API Management gateway, not the Container App. API Management checks `X-Azure-FDID` against the Front Door profile id, validates the HS256 JWT on authenticated routes, and applies `rate-limit-by-key` with the token's `sub` claim. A limit breach returns 429. Public routes (health, meta, sign-up, login, and the Layer 2 catalog) skip JWT validation and are limited per source IP.

@@ -13,7 +13,7 @@ The local stack runs with `docker compose up` and no cloud API keys. Mock provid
 - Per file (Layer 1): measured duration, summary, and taxonomy (`professional_topics`, `personal_topics`, `upcoming_events`).
 - Layer 2: RMS energy, spaCy noun and adjective counts, speaking pace, and a fixed sentiment lexicon.
 - Roll up a user's completed files by user, taxonomy label, week, or sentiment. The same job runs on a schedule and when the user asks.
-- Optional Assistant mode: a chat that uploads through the same APIs, then answers follow-up questions with a fixed set of tools. Mock mode answers with deterministic rules and still calls those tools.
+- Optional Assistant mode: a chat that uploads through the same APIs, shows the pipeline stage and a live job log from the API, then answers follow-up questions with a fixed set of tools. Mock mode answers with deterministic rules and still calls those tools.
 
 ## Repository layout
 
@@ -250,7 +250,7 @@ docker compose up --build
 
 Then open http://localhost:8501. The caption says mock mode is on. Create an account (password at least 8 characters), save the Layer 2 options, and use **Upload bundled sample**. The worker analyzes the file. The library shows duration, summary, taxonomy, and Layer 2. **Rollup** builds a collective summary.
 
-The sidebar switches between Classic and Assistant. Classic is the pages above. Assistant is a chat: attach one to ten files (or the bundled sample), pick Layer 2 options, and wait for a result card per file. Then ask a follow-up such as "what upcoming events did I mention this week?" or "summarize my files by topic". That calls `POST /api/v1/chat`. In mock mode the reply is rule-based and still runs the tools. Chat history stays in the browser session.
+The sidebar switches between Classic and Assistant. Classic is the pages above and stays within the phone-width layout. Assistant is wider: a flowchart of the selected file stays at the top, the chat scrolls underneath, and a live log sits in a right-hand column (or in the sidebar on a narrow window). Attach one to ten files (or the bundled sample), pick Layer 2 options, and wait. Completed steps turn green as the worker updates `stage`. Each result opens as its own panel (transcript, summary, topics, Layer 2) with a player for the recording. Tool calls show up as chips named `search_files`, `get_analysis`, or `run_summary`. Export conversation downloads one HTML file of that chat. Then ask a follow-up such as "what upcoming events did I mention this week?" or "summarize my files by topic". That calls `POST /api/v1/chat`. In mock mode the reply is rule-based and still runs the tools. Chat history stays in the browser session. Compose sets `MOCK_STAGE_DELAY_SEC=1.5` so the flowchart and log move during a demo.
 
 Services:
 
@@ -353,6 +353,7 @@ See [.env.example](.env.example). Compose already exports the mock-mode set.
 | `RATE_LIMIT_WINDOW_SECONDS` | 60 | Window length. `429` responses include `Retry-After` |
 | `RATE_LIMIT_BACKEND` | `redis` in compose and Azure, `memory` in `.env.example` | `memory` is one process only |
 | `ROLLUP_SCHEDULE_SECONDS` | 900 | Celery beat interval; the Azure job uses a 15 minute cron |
+| `MOCK_STAGE_DELAY_SEC` | `1.5` in compose, `0` otherwise | Pause before each analysis stage so the assistant flowchart can move |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Both required or Langfuse stays off |
 | `LANGFUSE_HOST` | cloud host | Langfuse base URL |
 | `OTEL_ENABLED` | false | Turn on OpenTelemetry |
@@ -378,6 +379,7 @@ Base path `/api/v1`. Authenticated routes expect `Authorization: Bearer <token>`
 | GET | `/files` | yes | List with filters |
 | GET | `/files/{id}` | yes | Detail plus transcript |
 | GET | `/files/{id}/audio` | yes | Audio bytes |
+| GET | `/events` | yes | Pipeline log for the caller, newest first |
 | POST | `/files/{id}/analyze` | yes | Re-queue analysis |
 | DELETE | `/files/{id}` | yes | Delete blobs and the row |
 | GET | `/prompts/options` | no | Layer 2 catalog |
@@ -423,7 +425,7 @@ Later: stage-split workers, ffmpeg so compressed audio gets real duration and RM
 ## Deviations from the agreed stack
 
 - The UI is Streamlit with a phone-width layout (max 440 px), talking to FastAPI over HTTP. That is the agreed interface. A native mobile client is not in this repository.
-- The `users` table is not hash-partitioned. PostgreSQL unique constraints on a partitioned table must include the partition key, and email must stay unique without being part of `user_id`. All tenant tables (`audio_files`, `transcripts`, `analyses`, `prompt_configs`, `rollup_summaries`) are `PARTITION BY HASH (user_id)`.
+- The `users` table is not hash-partitioned. PostgreSQL unique constraints on a partitioned table must include the partition key, and email must stay unique without being part of `user_id`. All tenant tables (`audio_files`, `transcripts`, `analyses`, `prompt_configs`, `rollup_summaries`, `file_events`) are `PARTITION BY HASH (user_id)`.
 - Duration and RMS are computed for 16-bit PCM WAV only. Other accepted types are stored and transcribed. Their Layer 2 energy step returns `skipped` with reason `wav_pcm16_required`. There is no ffmpeg in the image.
 - On-demand rollup is synchronous in the API, using the same `run_rollup` function as the scheduler, so the screen can show the result immediately.
 - Analysis queue messages all invoke the full pipeline. `llm-layer1` and `llm-layer2` are provisioned and routed by the dispatcher, and documented as the split point.

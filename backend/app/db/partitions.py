@@ -13,6 +13,7 @@ USER_SCOPED_TABLES = (
     "analyses",
     "prompt_configs",
     "rollup_summaries",
+    "file_events",
 )
 
 

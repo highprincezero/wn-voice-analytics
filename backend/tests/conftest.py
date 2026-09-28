@@ -15,6 +15,7 @@ os.environ["HOME_REGION"] = "local"
 os.environ["CHUNK_CHARS"] = "4000"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["RATE_LIMIT_BACKEND"] = "memory"
+os.environ["MOCK_STAGE_DELAY_SEC"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient

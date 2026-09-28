@@ -83,6 +83,8 @@ Azure mode asks for a JSON object whose only field is `reply`, then validates it
 
 The per-user rate limit sits in `get_current_user`, so chat is counted with the other authenticated routes.
 
+`GET /api/v1/events` uses the same JWT filter. A caller cannot read another user's pipeline log, and the messages do not include transcript text.
+
 ## What this does not claim
 
 - The mock safety provider is a stand-in for Azure AI Content Safety. It is deterministic and good enough for tests and the offline demo. Production must set `SAFETY_PROVIDER=azure`.

@@ -48,7 +48,28 @@ def serve_forever() -> None:
                             receiver.complete_message(message)
                         except Exception:
                             logger.exception("job failed on %s", queue)
+                            _note_abandon(message)
                             receiver.abandon_message(message)
+
+
+def _note_abandon(message) -> None:
+    try:
+        payload = message_json(message.body)
+    except Exception:
+        logger.exception("could not read abandoned message")
+        return
+    file_id = payload.get("file_id")
+    user_id = payload.get("user_id")
+    if not file_id or not user_id:
+        return
+    from app.analysis.progress import record_job_note
+
+    record_job_note(
+        user_id,
+        file_id,
+        "Service Bus message abandoned for retry",
+        level="error",
+    )
 
 
 def main() -> None:

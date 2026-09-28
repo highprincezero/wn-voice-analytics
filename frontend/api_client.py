@@ -70,6 +70,14 @@ class ApiClient:
     def get_file(self, file_id: str) -> dict:
         return self._request("GET", f"/api/v1/files/{file_id}").json()
 
+    def download_audio(self, file_id: str) -> tuple[bytes, str]:
+        response = self._request("GET", f"/api/v1/files/{file_id}/audio")
+        media = response.headers.get("content-type", "audio/wav").split(";")[0].strip()
+        return response.content, media or "audio/wav"
+
+    def list_events(self, limit: int = 300) -> dict:
+        return self._request("GET", "/api/v1/events", params={"limit": limit}).json()
+
     def delete_file(self, file_id: str) -> None:
         self._request("DELETE", f"/api/v1/files/{file_id}")
 
