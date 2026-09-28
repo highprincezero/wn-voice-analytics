@@ -10,6 +10,14 @@ resource "azurerm_postgresql_flexible_server" "this" {
   storage_mb                    = 131072
   sku_name                      = "GP_Standard_D4ds_v5"
   public_network_access_enabled = false
+  zone                          = var.postgres_zone
+  backup_retention_days         = 7
+  geo_redundant_backup_enabled  = true
+
+  high_availability {
+    mode                      = "ZoneRedundant"
+    standby_availability_zone = var.postgres_standby_zone
+  }
 
   depends_on = [azurerm_private_dns_zone_virtual_network_link.postgres]
 }
@@ -26,7 +34,7 @@ resource "azurerm_storage_account" "this" {
   resource_group_name             = azurerm_resource_group.this.name
   location                        = azurerm_resource_group.this.location
   account_tier                    = "Standard"
-  account_replication_type        = "ZRS"
+  account_replication_type        = "GZRS"
   account_kind                    = "StorageV2"
   min_tls_version                 = "TLS1_2"
   https_traffic_only_enabled      = true
@@ -39,6 +47,7 @@ resource "azurerm_storage_container" "voice" {
   container_access_type = "private"
 }
 
+# Standard is not zone redundant. Premium would be, and is not used here.
 resource "azurerm_redis_cache" "this" {
   name                 = "redis-${var.name_prefix}-${var.region_name}"
   location             = azurerm_resource_group.this.location

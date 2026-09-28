@@ -5,6 +5,7 @@ from langgraph.graph import END, StateGraph
 from app.analysis.audio_features import measure_duration
 from app.analysis.chunking import chunk_text
 from app.analysis.layer2 import run_layer2
+from app.analysis.progress import current_tracker
 from app.analysis.providers.factory import get_intelligence
 from app.analysis.schemas import validate_layer1, validate_layer2
 from app.analysis.taxonomy import union_taxonomy
@@ -29,6 +30,24 @@ class AnalysisState(TypedDict, total=False):
     layer2: dict
 
 
+def _begin(stage: str, message: str) -> None:
+    tracker = current_tracker()
+    if tracker is not None:
+        tracker.begin(stage, message)
+
+
+def _finish(stage: str, message: str) -> None:
+    tracker = current_tracker()
+    if tracker is not None:
+        tracker.finish(stage, message)
+
+
+def _note(message: str, *, stage: str | None = None) -> None:
+    tracker = current_tracker()
+    if tracker is not None:
+        tracker.note(message, stage=stage)
+
+
 def _prepare(state: AnalysisState) -> AnalysisState:
     with analysis_span("prepare"):
         try:
@@ -40,22 +59,30 @@ def _prepare(state: AnalysisState) -> AnalysisState:
         state["blocked"] = False
         state["block_reason"] = ""
         state["options"] = state.get("options") or []
+    _note(f"Audio prepared ({state.get('duration_sec') or 0} s)")
     return state
 
 
 def _transcribe(state: AnalysisState) -> AnalysisState:
+    _begin("transcribe", "Transcribe started")
     with analysis_span("transcribe"):
         state["transcript"] = get_intelligence().transcribe(
             state["audio_bytes"], state.get("filename") or "audio.wav"
         )
+    _finish("transcribe", "Transcribe finished")
     return state
 
 
 def _shield(state: AnalysisState) -> AnalysisState:
+    _begin("safety", "Safety check started")
     with analysis_span("content_safety"):
         result = get_safety().analyze_content(state.get("transcript") or "")
         state["blocked"] = result.blocked
         state["block_reason"] = result.reason
+    _finish("safety", "Safety check finished")
+    if state.get("blocked"):
+        _note("Layer 1 skipped because content safety blocked the transcript", stage="layer1")
+        _note("Layer 2 skipped because content safety blocked the transcript", stage="layer2")
     return state
 
 
@@ -64,6 +91,7 @@ def _route_after_shield(state: AnalysisState) -> str:
 
 
 def _layer1(state: AnalysisState) -> AnalysisState:
+    _begin("layer1", "Layer 1 started")
     with analysis_span("layer1"):
         provider = get_intelligence()
         settings = get_settings()
@@ -83,10 +111,12 @@ def _layer1(state: AnalysisState) -> AnalysisState:
         state["taxonomy"] = result["taxonomy"]
         state["summary_strategy"] = strategy
         state["chunk_count"] = chunk_count
+    _finish("layer1", "Layer 1 finished")
     return state
 
 
 def _layer2(state: AnalysisState) -> AnalysisState:
+    _begin("layer2", "Layer 2 started")
     with analysis_span("layer2"):
         state["layer2"] = run_layer2(
             audio=state["audio_bytes"],
@@ -95,6 +125,7 @@ def _layer2(state: AnalysisState) -> AnalysisState:
             options=state.get("options") or [],
             wav_ok=bool(state.get("wav_ok")),
         )
+    _finish("layer2", "Layer 2 finished")
     return state
 
 
@@ -110,6 +141,7 @@ def _validate(state: AnalysisState) -> AnalysisState:
         state["summary"] = validated["summary"]
         state["taxonomy"] = validated["taxonomy"]
         state["layer2"] = validate_layer2(state.get("layer2") or {})
+    _note("Validated summary and Layer 2 output", stage="layer2")
     return state
 
 

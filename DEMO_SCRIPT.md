@@ -1,6 +1,6 @@
 # Demo script
 
-Screen recording, about 6 minutes. Record the Streamlit app at http://localhost:8501 after `docker compose up --build`. Use a window around 440 pixels wide so the phone layout is obvious, or record a desktop window and say the layout is capped for a phone.
+Screen recording, about 9 minutes. Record the Streamlit app at http://localhost:8501 after `docker compose up --build`. Use a window around 440 pixels wide for the Classic pages so the phone layout is obvious. Widen the window before Assistant mode so the live log can sit in the right-hand column. Open the sidebar when the script reaches Assistant mode. Compose sets `MOCK_STAGE_DELAY_SEC=1.5`, so each pipeline step holds long enough to see the flowchart move.
 
 Before you start:
 
@@ -18,7 +18,7 @@ Say, in your own words, what is on screen. The beats below are the points to hit
 
 Show the title and the mock-mode caption.
 
-Say: this is a voice analytics proof of concept. The browser talks to a Streamlit client. That client calls a separate FastAPI service. Audio goes to blob storage under the user id. A worker runs a LangGraph pipeline: duration, transcript, content safety, summary, taxonomy, and the Layer 2 options the user picked. Today the models are deterministic stand-ins so the stack runs without API keys. The same graph calls Azure OpenAI `gpt-4o-transcribe` and `gpt-4.1-mini` when `LLM_PROVIDER=azure`.
+Say: this is a voice analytics proof of concept. The browser talks to a Streamlit client. That client calls a separate FastAPI service. Audio goes to blob storage under the user id. A worker runs a LangGraph pipeline: duration, transcript, content safety, summary, taxonomy, and the Layer 2 options the user picked. Today the models are deterministic stand-ins so the stack runs without API keys. The same graph calls Azure OpenAI `gpt-4o-transcribe` for speech and `gpt-5-mini` for analysis and chat when `LLM_PROVIDER=azure`. Both sit on one Azure OpenAI resource.
 
 ## 0:40 – 1:20  Sign up
 
@@ -77,12 +77,42 @@ Show the overall summary and a few groups (budget, dentist, and an upcoming line
 
 Say: the same function runs every 15 minutes for each user who has completed analyses. Locally that is Celery beat. In Azure it is a Container Apps Job. Grouping can also be all of my files, week, or sentiment. Long sets of summaries are map-reduced so the rollup stays inside the chunk budget.
 
-## 5:30 – 6:20  Account, isolation, and how it scales
+## 5:30 – 7:40  Assistant mode
+
+Widen the window. Open the sidebar and choose **Assistant**. Leave **Live log** on. Classic stays available when you switch back.
+
+Point at the flowchart across the top: Upload, Queued, Transcribe, Safety check, Layer 1, Layer 2, Saved. Pending steps are grey. Say: this row stays put while the chat underneath scrolls. It reads `stage` from the files API. The worker updates that column as each node starts.
+
+The first message asks for one recording or a set of up to ten. Your lines sit on the right. The assistant lines sit on the left with a small AI circle. Click **Use bundled sample**.
+
+Say: this is the same upload limit as the Upload page. The file is attached inside the chat, then the bot lists it back.
+
+Check **Lexicon sentiment** and **Speaking pace**. Click **Save options and start processing**.
+
+Say: those choices are saved with the same prompt-config API as the Prompts page. The upload uses the same files endpoint. The next line says processing has started.
+
+Watch the flowchart. The current step pulses, the connector into it marches, and finished steps turn green. In the log, newest line first, read a few entries: file saved to blob storage, row inserted in Postgres, job queued with a task id, worker picked up, then each stage starting and finishing with a duration, then results saved. Say: that log is `GET /api/v1/events` for this user, not a guess in the browser. Toggle **Live log** off and on. On a narrow window the same log is in the sidebar and the steps wrap.
+
+When the file is saved, open the panels: Output · Transcript (with the audio player), Output · Summary, Output · Topics & events, Output · Layer 2. Read the summary, one professional topic, one personal topic, and an upcoming line.
+
+In the chat box, ask: what upcoming events did I mention this week?
+
+Read the reply. It should name an upcoming line from the panel, such as Friday or Tuesday. Point at the chip named `search_files` and the output panel under the reply.
+
+Ask: summarize my files by topic.
+
+Point at the `run_summary` chip. Say: that question calls `POST /api/v1/chat`. A small LangGraph agent can search this user's files, open one analysis, or run the same rollup job. In mock mode the choice is a fixed rule, and it still runs the tool. The question is checked for prompt injection before the graph runs. The agent never sees another user's rows. The transcript is not pasted into the tool result. Chat history stays in this browser session.
+
+Click **Export conversation**. Open the downloaded HTML and show the same bubbles, chips, and panels, with the audio still playable inside the file.
+
+Switch the sidebar back to **Classic** and open Rollup if you want to show that the topic summary was stored with trigger `on_demand`. Narrow the window again if you still want the phone layout in frame.
+
+## 7:40 – 8:20  Account, isolation, and how it scales
 
 Open Account. Show the email, the user id, and home region `local`.
 
-Say: every audio row, transcript, analysis, prompt config, and rollup is keyed by this user id. Postgres hash-partitions those tables into 16 buckets. Another account gets a 404 for this file id. Blob keys that do not start with `users/{this user id}/` are rejected.
+Say: every audio row, transcript, analysis, prompt config, rollup, and pipeline event is keyed by this user id. Postgres hash-partitions those tables into 16 buckets. Another account gets a 404 for this file id and an empty event log. Blob keys that do not start with `users/{this user id}/` are rejected.
 
-Close on the architecture in one sentence: N regions, each sized for 10,000 registered users and 2,000 concurrent users, Front Door in front, and no cross-region read of audio on the request path. The planning case is about half a file per second per region at peak, which fits the worker replica range in the Terraform module.
+Close on the architecture in one sentence: N regions, each sized for 10,000 registered users and 2,000 concurrent users, Front Door in front of API Management, then the API, and no cross-region read of audio on the request path. The planning case is about half a file per second per region at peak, which fits the worker replica range in the Terraform module. API Management Basic rate-limits each token's `sub` claim, and the API repeats that limit in Redis.
 
-Optional last line, if you have ten seconds: the tests cover auth, upload, the mock pipeline, partition SQL, the rollup, and the guardrails, and GitHub Actions also validates the Terraform.
+Optional last line, if you have ten seconds: the tests cover auth, upload, the mock pipeline, the stage log, partition SQL, the rollup, and the guardrails, and GitHub Actions also validates the Terraform.

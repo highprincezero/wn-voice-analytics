@@ -170,7 +170,44 @@ CREATE TABLE IF NOT EXISTS rollup_summaries_p13 PARTITION OF rollup_summaries FO
 CREATE TABLE IF NOT EXISTS rollup_summaries_p14 PARTITION OF rollup_summaries FOR VALUES WITH (MODULUS 16, REMAINDER 14);
 CREATE TABLE IF NOT EXISTS rollup_summaries_p15 PARTITION OF rollup_summaries FOR VALUES WITH (MODULUS 16, REMAINDER 15);
 
+CREATE TABLE IF NOT EXISTS file_events (
+    user_id UUID NOT NULL,
+    id UUID NOT NULL,
+    file_id UUID NOT NULL,
+    filename TEXT NOT NULL,
+    message TEXT NOT NULL,
+    seq BIGINT NOT NULL,
+    stage TEXT,
+    level TEXT NOT NULL DEFAULT 'info',
+    duration_ms INTEGER,
+    created_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (user_id, id),
+    CONSTRAINT file_events_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT file_events_file_fk FOREIGN KEY (user_id, file_id) REFERENCES audio_files (user_id, id) ON DELETE CASCADE,
+    CONSTRAINT file_events_level_chk CHECK (level IN ('info', 'error'))
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE IF NOT EXISTS file_events_p0 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE IF NOT EXISTS file_events_p1 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+CREATE TABLE IF NOT EXISTS file_events_p2 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 2);
+CREATE TABLE IF NOT EXISTS file_events_p3 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 3);
+CREATE TABLE IF NOT EXISTS file_events_p4 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 4);
+CREATE TABLE IF NOT EXISTS file_events_p5 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 5);
+CREATE TABLE IF NOT EXISTS file_events_p6 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 6);
+CREATE TABLE IF NOT EXISTS file_events_p7 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 7);
+CREATE TABLE IF NOT EXISTS file_events_p8 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 8);
+CREATE TABLE IF NOT EXISTS file_events_p9 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 9);
+CREATE TABLE IF NOT EXISTS file_events_p10 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 10);
+CREATE TABLE IF NOT EXISTS file_events_p11 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 11);
+CREATE TABLE IF NOT EXISTS file_events_p12 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 12);
+CREATE TABLE IF NOT EXISTS file_events_p13 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 13);
+CREATE TABLE IF NOT EXISTS file_events_p14 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 14);
+CREATE TABLE IF NOT EXISTS file_events_p15 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 15);
+
+ALTER TABLE audio_files ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'upload';
+
 CREATE INDEX IF NOT EXISTS audio_files_user_created_idx ON audio_files (user_id, created_at);
+CREATE INDEX IF NOT EXISTS file_events_user_seq_idx ON file_events (user_id, seq);
 CREATE INDEX IF NOT EXISTS analyses_user_created_idx ON analyses (user_id, created_at);
 CREATE INDEX IF NOT EXISTS analyses_user_status_idx ON analyses (user_id, status);
 CREATE INDEX IF NOT EXISTS rollup_summaries_user_created_idx ON rollup_summaries (user_id, created_at);

@@ -3,6 +3,7 @@ import logging
 import uuid
 
 from app.analysis.graph import run_graph
+from app.analysis.progress import append_event, mark_queued, pause_for_demo, track
 from app.config import get_settings
 from app.db.models import Analysis, AudioFile, PromptConfig, Transcript
 from app.db.session import SessionLocal
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 def enqueue_analysis(file_id: uuid.UUID, user_id: uuid.UUID) -> None:
     settings = get_settings()
     if settings.analysis_mode == "inline":
+        mark_queued(file_id, user_id, "Analysis started inline (no queue)")
         try:
             run_file_analysis(str(file_id), str(user_id))
         except Exception:
@@ -26,14 +28,17 @@ def enqueue_analysis(file_id: uuid.UUID, user_id: uuid.UUID) -> None:
     if settings.broker == "servicebus":
         from app.jobs.publisher import publish_job
 
+        mark_queued(file_id, user_id, "Job queued on Service Bus (transcription)")
         publish_job("transcription", body)
         return
     from app.jobs.tasks import analyze_file_task
 
-    analyze_file_task.delay(str(file_id), str(user_id))
+    task_id = str(uuid.uuid4())
+    mark_queued(file_id, user_id, f"Job queued (task id {task_id})")
+    analyze_file_task.apply_async((str(file_id), str(user_id)), task_id=task_id)
 
 
-def run_file_analysis(file_id: str, user_id: str) -> None:
+def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) -> None:
     db = SessionLocal()
     try:
         uid = uuid.UUID(str(user_id))
@@ -47,36 +52,49 @@ def run_file_analysis(file_id: str, user_id: str) -> None:
         audio.status = "processing"
         audio.error_message = None
         db.commit()
-        try:
-            payload = get_blob_store().download(audio.storage_key)
-            config = db.query(PromptConfig).filter(PromptConfig.user_id == uid).one_or_none()
-            raw_options = list(config.selections) if config is not None else []
-            options = validate_selections(raw_options) if raw_options else []
-            state = run_graph(
-                audio_bytes=payload,
-                filename=audio.original_filename,
-                options=options,
-            )
-            _persist(db, audio, state)
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            failed = (
-                db.query(AudioFile)
-                .filter(AudioFile.user_id == uid, AudioFile.id == fid)
-                .one_or_none()
-            )
-            if failed is not None:
-                failed.status = "failed"
-                failed.error_message = type(exc).__name__[:200]
+        with track(db, audio) as tracker:
+            pickup = "Worker picked up the job"
+            if task_id:
+                pickup = f"{pickup} (task id {task_id})"
+            tracker.note(pickup)
+            pause_for_demo()
+            try:
+                payload = get_blob_store().download(audio.storage_key)
+                config = db.query(PromptConfig).filter(PromptConfig.user_id == uid).one_or_none()
+                raw_options = list(config.selections) if config is not None else []
+                options = validate_selections(raw_options) if raw_options else []
+                state = run_graph(
+                    audio_bytes=payload,
+                    filename=audio.original_filename,
+                    options=options,
+                )
+                _persist(db, audio, state, tracker)
                 db.commit()
-            logger.exception("analysis failed for %s", file_id)
-            raise
+            except Exception as exc:
+                db.rollback()
+                failed = (
+                    db.query(AudioFile)
+                    .filter(AudioFile.user_id == uid, AudioFile.id == fid)
+                    .one_or_none()
+                )
+                if failed is not None:
+                    failed.status = "failed"
+                    failed.error_message = type(exc).__name__[:200]
+                    append_event(
+                        db,
+                        failed,
+                        f"Analysis failed: {type(exc).__name__}",
+                        stage=failed.stage,
+                        level="error",
+                    )
+                    db.commit()
+                logger.exception("analysis failed for %s", file_id)
+                raise
     finally:
         db.close()
 
 
-def _persist(db, audio: AudioFile, state: dict) -> None:
+def _persist(db, audio: AudioFile, state: dict, tracker) -> None:
     blocked = bool(state.get("blocked"))
     audio.duration_sec = float(state.get("duration_sec") or 0)
     audio.status = "blocked" if blocked else "completed"
@@ -158,3 +176,5 @@ def _persist(db, audio: AudioFile, state: dict) -> None:
         analysis.summary_strategy = document["summary_strategy"]
         analysis.provider = provider
         analysis.storage_key = a_key
+    audio.stage = "saved"
+    tracker.note("Results saved to Postgres and blob storage", stage="saved")

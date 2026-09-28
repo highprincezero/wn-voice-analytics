@@ -4,13 +4,15 @@ flowchart TB
   fd --> rn[Region N]
 
   subgraph regionBox [Each region]
-    apim[API Management]
+    apim[API Management Basic per-user limit]
     api[API replicas min 2 max 8]
+    chat[Chat agent]
     queues[Queues transcription llm layer2 rollup]
     workers[Service Bus workers]
     rollup[Cron rollup job]
-    db[(Postgres 16 hash partitions)]
-    blob[(Blob keys under user id)]
+    db[(Postgres zone-redundant HA)]
+    blob[(Blob GZRS under user id)]
+    cache[(Redis Standard rate limit)]
     oai[Azure OpenAI and Content Safety]
     obs[Log Analytics and Langfuse]
   end
@@ -18,6 +20,8 @@ flowchart TB
   r1 --> apim
   rn --> apim
   apim --> api
+  api --> chat
+  api --> cache
   api --> queues
   queues --> workers
   workers --> db

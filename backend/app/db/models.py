@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     Float,
@@ -51,6 +52,7 @@ class AudioFile(Base):
     storage_key: Mapped[str] = mapped_column(Text)
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="uploaded")
+    stage: Mapped[str] = mapped_column(String(32), default="upload")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
 
@@ -146,4 +148,34 @@ class RollupSummary(Base):
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
 
 
+class FileEvent(Base):
+    __tablename__ = "file_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "file_id"],
+            ["audio_files.user_id", "audio_files.id"],
+            ondelete="CASCADE",
+            name="file_events_file_fk",
+        ),
+        CheckConstraint(
+            "level IN ('info', 'error')",
+            name="file_events_level_chk",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True))
+    filename: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
+    seq: Mapped[int] = mapped_column(BigInteger)
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    level: Mapped[str] = mapped_column(String(16), default="info")
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
+
+
 ALLOWED_FILE_STATUSES = _STATUSES
+PIPELINE_STAGES = ("upload", "queued", "transcribe", "safety", "layer1", "layer2", "saved")

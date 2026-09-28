@@ -11,6 +11,8 @@ Layer 2 is optional in the original brief and implemented here. The guardrails a
 | Audio content | The transcript contains a jailbreak aimed at the model, or content the product should not send to the model. |
 | Model output | The model returns extra fields, missing fields, or a summary that does not match the schema. |
 | Other users | One account reads or deletes another account's files. |
+| Chat question | The user hides instructions in the question or in history, names another user's file, or asks the agent to call a tool that is not in the set. |
+| Chat tool output | A summary or taxonomy label is later treated as an instruction. |
 
 ## Controls
 
@@ -50,7 +52,7 @@ If the check blocks, the file status becomes `blocked`, the reason is stored, th
 
 ### 4. Structured output and a second validation
 
-Azure chat calls set `response_format` to a strict JSON schema (`additionalProperties: false`, required fields listed). Duration is not requested from the model. It is measured from the file.
+Azure chat calls set `response_format` to a strict JSON schema (`additionalProperties: false`, required fields listed). The request omits `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set. `gpt-5-mini` rejects an explicit temperature of 0. Duration is not requested from the model. It is measured from the file.
 
 After the graph finishes, Pydantic validates:
 
@@ -66,6 +68,22 @@ Map-reduce has a recall guard: topics found on any chunk are unioned with the re
 ### 5. Authorization
 
 Every file, transcript, analysis, prompt row, and rollup is queried with the `user_id` from the JWT. A missing row is a 404, including when the id belongs to someone else. Blob downloads check that the key starts with `users/{user_id}/`. Passwords are hashed with bcrypt. Tokens are HS256 JWTs with an expiry.
+
+### 6. Chat tools and the question text
+
+`POST /api/v1/chat` runs the same content-safety check used for prompt configuration, on the new message and on every history turn. A hit is HTTP 400 and the graph does not run. History roles are only `user` and `assistant`. A `system` role or a `user_id` field on the body is rejected before the agent sees it.
+
+The system text is a constant. The question is placed in the user message inside `<question>` tags. Tool results go in `<tool_result>` tags. Both are described as data. Tests check that a jailbreak sentence in the question does not appear in the system text.
+
+The graph may execute only `search_files`, `get_analysis`, and `run_summary`. Any other name returns `unknown_tool` and is not called. Arguments are parsed with Pydantic models that forbid extra fields, so a model cannot pass `user_id`. Each query adds `AudioFile.user_id == <jwt subject>`. A foreign file id is `not_found`.
+
+`get_analysis` returns the summary, taxonomy, and Layer 2 object. It does not return the transcript. The transcript was already shielded during analysis, and the chat agent does not need the raw words to answer questions about topics and upcoming events.
+
+Azure mode asks for a JSON object whose only field is `reply`, then validates it again. Extra fields fail that check, and the API uses the rule-based reply instead of the model text. Mock mode never calls the chat deployment. It still runs the tool node, so the tests exercise the same whitelist and the same user filter.
+
+The per-user rate limit sits in `get_current_user`, so chat is counted with the other authenticated routes.
+
+`GET /api/v1/events` uses the same JWT filter. A caller cannot read another user's pipeline log, and the messages do not include transcript text.
 
 ## What this does not claim
 

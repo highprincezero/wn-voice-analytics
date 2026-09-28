@@ -56,9 +56,11 @@ Same body. `200` with the same token object. `401` on a bad email or password.
 { "items": [ { "id": "<uuid>", "status": "uploaded", "storage_key": "users/<user_id>/audio/<file_id>.wav" } ] }
 ```
 
-Each item also includes `original_filename`, `content_type`, `byte_size`, `duration_sec`, `created_at`, `error_message`, and, once analysis has finished in the same request (`ANALYSIS_MODE=inline`), `summary`, `taxonomy`, `layer2`, `summary_strategy`, `provider`, and `block_reason`.
+Each item also includes `original_filename`, `content_type`, `byte_size`, `duration_sec`, `created_at`, `error_message`, `stage`, `skipped_stages`, and, once analysis has finished in the same request (`ANALYSIS_MODE=inline`), `summary`, `taxonomy`, `layer2`, `summary_strategy`, `provider`, and `block_reason`.
 
-The object is written, the row is committed, then analysis is queued. With Celery, the first response usually still says `uploaded`.
+`stage` is the pipeline step the worker last entered: `upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, or `saved`. `status` stays `uploaded`, `processing`, `completed`, `blocked`, or `failed`. A blocked file finishes at `saved` with `skipped_stages` of `layer1` and `layer2`. A failure leaves `stage` on the step that raised.
+
+The object is written, the row is committed, then analysis is queued. With Celery, the first response usually still says `uploaded` or `queued`. `MOCK_STAGE_DELAY_SEC` pauses at each step so a client can poll the change. Tests and Azure leave it at 0.
 
 ### GET /api/v1/files
 
@@ -93,7 +95,30 @@ Sets status back to `uploaded` and queues the pipeline again. Returns the file o
 
 ### DELETE /api/v1/files/{file_id}
 
-`204`. Deletes the audio, transcript, and analysis blobs, then the row. Child rows cascade.
+`204`. Deletes the audio, transcript, and analysis blobs, then the row. Child rows, including the file's events, cascade.
+
+### GET /api/v1/events
+
+Newest first, at most 300. Optional `file_id` limits the list to one of the caller's files. Another user's id returns an empty list.
+
+```json
+{
+  "items": [
+    {
+      "id": "<uuid>",
+      "file_id": "<uuid>",
+      "filename": "sample_call.wav",
+      "message": "Transcribe finished (1400 ms)",
+      "stage": "transcribe",
+      "level": "info",
+      "duration_ms": 1400,
+      "created_at": "2026-09-28T12:00:01"
+    }
+  ]
+}
+```
+
+`level` is `info` or `error`. `duration_ms` is set on stage finish lines. Messages cover the blob write, the Postgres insert, the queue (Celery task id, Service Bus, or inline), worker pickup, each stage start and finish, skipped stages, the saved result, and errors or retries. Transcript text is not copied into the log.
 
 ## Prompts
 
@@ -132,6 +157,54 @@ Only analyses with status `completed` are included.
 ### GET /api/v1/summaries
 
 `{"items": [ ... ]}`, newest first, at most 50. Scheduled runs have `trigger` `schedule`.
+
+## Chat
+
+### POST /api/v1/chat
+
+```json
+{
+  "message": "what upcoming events did I mention this week?",
+  "history": [
+    {"role": "user", "content": "Attached 1 file(s): sample_call.wav."},
+    {"role": "assistant", "content": "Processing has started for 1 file(s): sample_call.wav."}
+  ]
+}
+```
+
+`message` is 1 to 2000 characters. `history` is optional, at most 8 turns, each `role` of `user` or `assistant`. Extra fields, including a `user_id`, are rejected with `422`. The server uses the JWT subject and ignores any identity in the body.
+
+`200`:
+
+```json
+{
+  "reply": "Upcoming events:\nsample_call.wav: Please send the notes by Friday.",
+  "tool_calls": [
+    {
+      "name": "search_files",
+      "arguments": {"date_from": "2026-09-28T00:00:00"},
+      "result": {
+        "total": 1,
+        "items": [
+          {
+            "id": "<uuid>",
+            "filename": "sample_call.wav",
+            "taxonomy": {"upcoming_events": ["Please send the notes by Friday."]}
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`tool_calls` has at most one entry. `name` is `search_files`, `get_analysis`, or `run_summary`. `search_files` accepts `date_from`, `date_to`, `min_duration`, `max_duration`, and `taxonomy`. `get_analysis` accepts `file_id`. `run_summary` accepts `group_by` (`user`, `taxonomy_label`, `week`, `sentiment`) and optional times. A miss, including another user's file id, is `result.error` of `not_found` and a reply that says the recording is not on this account.
+
+`400` when content safety blocks the message or any history turn. `401` without a token.
+
+With `LLM_PROVIDER=mock` the plan step is a fixed set of rules. "what upcoming events did I mention this week?" calls `search_files` with the start of the current week. "summarize my files by topic" calls `run_summary` with `group_by` `taxonomy_label`. A question that names a file UUID calls `get_analysis`. The reply is built from the tool result, not from a model.
+
+Authenticated routes, including this one, are also counted by the per-user rate limit. Over the limit is `429` with a `Retry-After` header and `{"detail": "rate limit exceeded"}`. Health, sign-up, login, meta, and the prompt catalog are not counted.
 
 ## Meta
 

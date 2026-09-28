@@ -15,6 +15,20 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
+def chat_sampling_fields() -> dict:
+    """Optional chat-completion fields.
+
+    Temperature is omitted unless AZURE_OPENAI_CHAT_TEMPERATURE is set.
+    gpt-5-mini rejects an explicit temperature of 0 and rejects max_tokens.
+    A token cap, if one is added later, belongs in max_completion_tokens.
+    """
+    temperature = get_settings().azure_openai_chat_temperature
+    if temperature is None:
+        return {}
+    return {"temperature": float(temperature)}
+
+
 _ROLLUP_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -39,11 +53,11 @@ class AzureIntelligence:
         )
         body = {
             "messages": messages,
-            "temperature": 0,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": name, "strict": True, "schema": schema},
             },
+            **chat_sampling_fields(),
         }
         headers = {"api-key": settings.azure_openai_api_key, "Content-Type": "application/json"}
         last_error: Exception | None = None

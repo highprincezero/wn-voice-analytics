@@ -16,6 +16,7 @@ override.tf.json
 *_override.tf.json
 .idea/
 .vscode/
+.history/
 *.egg-info/
 dist/
 build/

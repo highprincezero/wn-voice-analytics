@@ -13,6 +13,7 @@ The local stack runs with `docker compose up` and no cloud API keys. Mock provid
 - Per file (Layer 1): measured duration, summary, and taxonomy (`professional_topics`, `personal_topics`, `upcoming_events`).
 - Layer 2: RMS energy, spaCy noun and adjective counts, speaking pace, and a fixed sentiment lexicon.
 - Roll up a user's completed files by user, taxonomy label, week, or sentiment. The same job runs on a schedule and when the user asks.
+- Optional Assistant mode: a chat that uploads through the same APIs, shows the pipeline stage and a live job log from the API, then answers follow-up questions with a fixed set of tools. Mock mode answers with deterministic rules and still calls those tools.
 
 ## Repository layout
 
@@ -39,35 +40,39 @@ Three layers. Streamlit is the only UI. It calls FastAPI over HTTP. FastAPI owns
 ```mermaid
 flowchart TB
   subgraph interfaceLayer [Interface layer]
-    UI[Streamlit client]
+    UI[Streamlit classic and assistant]
   end
 
   subgraph implementationLayer [Implementation layer]
     FD[Azure Front Door]
-    APIM[API Management]
-    API[FastAPI and JWT]
+    APIM[API Management Basic JWT and per-user limit]
+    API[FastAPI JWT and Redis rate limit]
     SB[Service Bus queues]
     WK[Container Apps workers]
     JOB[Scheduled rollup job]
-    PG[(PostgreSQL hash partitions)]
-    BLOB[(Blob storage)]
-    CACHE[(Redis cache)]
+    PG[(PostgreSQL zone-redundant HA)]
+    BLOB[(Blob storage GZRS)]
+    CACHE[(Redis cache and rate limit)]
     OBS[App Insights and OpenTelemetry]
   end
 
   subgraph intelligenceLayer [Intelligence layer]
-    LG[LangGraph pipeline]
+    LG[LangGraph analysis pipeline]
+    CHAT[LangGraph chat agent]
     STT[gpt-4o-transcribe]
-    LLM[gpt-4.1-mini structured output]
+    LLM[gpt-5-mini structured output]
     CS[Content Safety Prompt Shields]
     FEAT[RMS energy and spaCy]
   end
 
   UI --> FD --> APIM --> API
+  API --> CHAT
   API --> PG
   API --> BLOB
   API --> SB
   API --> CACHE
+  CHAT --> CS
+  CHAT --> LLM
   SB --> WK
   JOB --> PG
   WK --> LG
@@ -85,7 +90,7 @@ Longer write-up: [docs/architecture.md](docs/architecture.md).
 
 ### Analysis pipeline
 
-LangGraph order: measure duration, transcribe, content safety, then either one structured summary or a map-reduce over chunks, then the selected Layer 2 options, then schema validation, then persist. A blocked transcript is stored and the chat model is not called.
+LangGraph order: measure duration, transcribe, content safety, then either one structured summary or a map-reduce over chunks, then the selected Layer 2 options, then schema validation, then persist. A blocked transcript is stored and the chat model is not called. Speech-to-text uses `gpt-4o-transcribe`. Analysis and the chat agent use `gpt-5-mini`. Both deployments are on one Azure OpenAI resource. Chat requests omit `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set, because this model rejects a temperature of 0. JSON replies still use `response_format`.
 
 ![Analysis pipeline](docs/diagrams/analysis-pipeline.png)
 
@@ -123,13 +128,15 @@ flowchart TB
   fd --> rn[Region N]
 
   subgraph regionBox [Each region]
-    apim[API Management]
+    apim[API Management Basic per-user limit]
     api[API replicas min 2 max 8]
+    chat[Chat agent]
     queues[Queues transcription llm layer2 rollup]
     workers[Service Bus workers]
     rollup[Cron rollup job]
-    db[(Postgres 16 hash partitions)]
-    blob[(Blob keys under user id)]
+    db[(Postgres zone-redundant HA)]
+    blob[(Blob GZRS under user id)]
+    cache[(Redis Standard rate limit)]
     oai[Azure OpenAI and Content Safety]
     obs[Log Analytics and Langfuse]
   end
@@ -137,6 +144,8 @@ flowchart TB
   r1 --> apim
   rn --> apim
   apim --> api
+  api --> chat
+  api --> cache
   api --> queues
   queues --> workers
   workers --> db
@@ -241,6 +250,8 @@ docker compose up --build
 
 Then open http://localhost:8501. The caption says mock mode is on. Create an account (password at least 8 characters), save the Layer 2 options, and use **Upload bundled sample**. The worker analyzes the file. The library shows duration, summary, taxonomy, and Layer 2. **Rollup** builds a collective summary.
 
+The sidebar switches between Classic and Assistant. Classic is the pages above and stays within the phone-width layout. Assistant is wider: a flowchart of the selected file stays at the top, the chat scrolls underneath, and a live log sits in a right-hand column (or in the sidebar on a narrow window). Attach one to ten files (or the bundled sample), pick Layer 2 options, and wait. Completed steps turn green as the worker updates `stage`. Each result opens as its own panel (transcript, summary, topics, Layer 2) with a player for the recording. Tool calls show up as chips named `search_files`, `get_analysis`, or `run_summary`. Export conversation downloads one HTML file of that chat. Then ask a follow-up such as "what upcoming events did I mention this week?" or "summarize my files by topic". That calls `POST /api/v1/chat`. In mock mode the reply is rule-based and still runs the tools. Chat history stays in the browser session. Compose sets `MOCK_STAGE_DELAY_SEC=1.5` so the flowchart and log move during a demo.
+
 Services:
 
 | Service | Port | Role |
@@ -284,7 +295,7 @@ terraform init
 terraform plan
 ```
 
-`regions` defaults to eastus and westeurope. Add or remove entries to change N. Each entry builds a `region_stack` module: resource group, VNet, Postgres Flexible Server, blob storage, Redis, Key Vault, Service Bus (four queues), Log Analytics, Application Insights, Azure OpenAI (`gpt-4o-transcribe` and `gpt-4.1-mini`), Content Safety, Container Apps (API and worker), a cron rollup job, and API Management. A global resource group holds Azure Front Door with one origin per region.
+`regions` defaults to eastus and westeurope. Add or remove entries to change N. Each entry builds a `region_stack` module: resource group, VNet, Postgres Flexible Server (zone-redundant HA and geo-redundant backups), GZRS blob storage, Redis Standard, Key Vault, Service Bus Standard (four queues), Log Analytics, Application Insights, Azure OpenAI (`gpt-4o-transcribe` and `gpt-5-mini`), Content Safety, a zone-redundant Container Apps environment (API and worker), a cron rollup job, and API Management Basic. A global resource group holds Azure Front Door. Each origin is that region's API Management gateway, which forwards to the Container App. The API ingress allowlists API Management's public IPs.
 
 Validate without credentials:
 
@@ -311,7 +322,7 @@ The API publishes analysis work to the `transcription` queue. The worker command
 
 ## Environment variables
 
-See [.env.example](.env.example). Compose already exports the mock-mode set.
+See [.env.example](.env.example). Compose reads a repo-root `.env` for the API and worker. Mock mode is the default and needs no keys. Set `LLM_PROVIDER=azure`, `SAFETY_PROVIDER=azure`, and the endpoint and key in that file to call Azure.
 
 | Variable | Local default | Meaning |
 | --- | --- | --- |
@@ -329,14 +340,21 @@ See [.env.example](.env.example). Compose already exports the mock-mode set.
 | `AZURE_OPENAI_API_KEY` | empty | Required when `LLM_PROVIDER=azure` |
 | `AZURE_OPENAI_API_VERSION` | `2025-03-01-preview` | Chat and transcription API version |
 | `AZURE_OPENAI_TRANSCRIBE_DEPLOYMENT` | `gpt-4o-transcribe` | Speech deployment name |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` | Structured-output deployment name |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-5-mini` | Analysis and chat deployment name |
+| `AZURE_OPENAI_CHAT_TEMPERATURE` | empty | Optional. Unset omits temperature. This model rejects 0. |
 | `AZURE_CONTENT_SAFETY_ENDPOINT` | empty | Required when `SAFETY_PROVIDER=azure` |
 | `AZURE_CONTENT_SAFETY_KEY` | empty | Required when `SAFETY_PROVIDER=azure` |
 | `CONTENT_SAFETY_BLOCK_SEVERITY` | 4 | Block at this Azure severity or higher |
 | `SERVICE_BUS_CONNECTION_STRING` | empty | Required when `BROKER=servicebus` |
 | `CELERY_BROKER_URL` | Redis db 0 | Local broker |
 | `CELERY_RESULT_BACKEND` | Redis db 1 | Local result backend (results are ignored) |
+| `REDIS_URL` | Redis db 2 in compose | Rate-limit counter. Falls back to `CELERY_BROKER_URL` when empty |
+| `RATE_LIMIT_ENABLED` | true | Per-user limit on authenticated routes |
+| `RATE_LIMIT_REQUESTS` | 120 | Allowed requests per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | 60 | Window length. `429` responses include `Retry-After` |
+| `RATE_LIMIT_BACKEND` | `redis` in compose and Azure, `memory` in `.env.example` | `memory` is one process only |
 | `ROLLUP_SCHEDULE_SECONDS` | 900 | Celery beat interval; the Azure job uses a 15 minute cron |
+| `MOCK_STAGE_DELAY_SEC` | `1.5` in compose, `0` otherwise | Pause before each analysis stage so the assistant flowchart can move |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | empty | Both required or Langfuse stays off |
 | `LANGFUSE_HOST` | cloud host | Langfuse base URL |
 | `OTEL_ENABLED` | false | Turn on OpenTelemetry |
@@ -362,6 +380,7 @@ Base path `/api/v1`. Authenticated routes expect `Authorization: Bearer <token>`
 | GET | `/files` | yes | List with filters |
 | GET | `/files/{id}` | yes | Detail plus transcript |
 | GET | `/files/{id}/audio` | yes | Audio bytes |
+| GET | `/events` | yes | Pipeline log for the caller, newest first |
 | POST | `/files/{id}/analyze` | yes | Re-queue analysis |
 | DELETE | `/files/{id}` | yes | Delete blobs and the row |
 | GET | `/prompts/options` | no | Layer 2 catalog |
@@ -369,6 +388,7 @@ Base path `/api/v1`. Authenticated routes expect `Authorization: Bearer <token>`
 | PUT | `/prompts/config` | yes | Replace selections |
 | POST | `/summaries` | yes | On-demand rollup |
 | GET | `/summaries` | yes | Recent rollups |
+| POST | `/chat` | yes | Follow-up question for the chat agent |
 | GET | `/health` | no | Liveness |
 | GET | `/health/ready` | no | Database check |
 | GET | `/meta` | no | Active providers |
@@ -384,10 +404,11 @@ Written design: [docs/guardrails.md](docs/guardrails.md).
 3. System prompts are constants. The transcript is placed only in the user message, inside `<transcript>` markers, and is treated as data.
 4. The transcript is shielded before any summary call. A block stores the transcript and skips the model.
 5. Azure chat calls use a strict JSON schema. Pydantic checks the payload again before it is stored. Topics found on any map chunk are unioned back after reduce.
+6. Assistant chat input, including history, goes through the same content-safety check. The agent may call only `search_files`, `get_analysis`, and `run_summary`. Arguments are validated, queries filter on the JWT `user_id`, and the reply is a structured string. Tool results are data. The raw transcript is not sent to the agent.
 
 ## Cost, trade-offs, future work
 
-Transcription minutes dominate cost at the planning case (about 900,000 minutes per region per month if every registered user uploads one 3 minute file a day). `gpt-4.1-mini`, Content Safety, Postgres, and Container Apps are smaller lines. Multiply by N. Figures and the assumptions behind them are in [docs/scaling.md](docs/scaling.md). Recheck the Azure price sheet before using them as a budget.
+Transcription minutes dominate cost at the planning case (about 900,000 minutes per region per month if every registered user uploads one 3 minute file a day). `gpt-5-mini`, Content Safety, Postgres, and Container Apps are smaller lines. Multiply by N. Figures and the assumptions behind them are in [docs/scaling.md](docs/scaling.md). Recheck the Azure price sheet before using them as a budget.
 
 Trade-offs in this POC:
 
@@ -397,20 +418,25 @@ Trade-offs in this POC:
 - Four Service Bus queues exist. Any analysis message currently runs the full idempotent pipeline. Splitting stages is the next scale step, not a new message contract.
 - On-demand rollup runs in the API process. The schedule is Celery beat locally and a Container Apps Job in Azure.
 - Celery beat is embedded in the single local worker. Do not run more than one beat process. Production uses the cron job instead.
+- API Management is Basic, not Consumption. `rate-limit-by-key` is not available on Consumption, and that is the policy that keys a limit on the JWT `sub` claim. Basic is about $150 per region per month and covers the planning rate. Premium would add zones and a virtual network, and is not used. See [docs/scaling.md](docs/scaling.md).
+- Postgres is zone-redundant with geo-redundant backups. Blob storage is GZRS. The Container Apps environment is zone redundant. Service Bus, Redis, and API Management stay off Premium. A user's rows still live only in the home region.
 
-Later: stage-split workers, ffmpeg so compressed audio gets real duration and RMS, a global email directory in front of regional sign-up, private endpoints, geo-redundant blob and a failover story, a quality evaluation set, and a retention policy for blocked transcripts.
+Later: stage-split workers, ffmpeg so compressed audio gets real duration and RMS, a global email directory in front of regional sign-up, private endpoints, a live cross-region copy of each user's data, Premium for Service Bus, Redis, and API Management if zone redundancy on those services is required, a quality evaluation set, and a retention policy for blocked transcripts.
 
 ## Deviations from the agreed stack
 
 - The UI is Streamlit with a phone-width layout (max 440 px), talking to FastAPI over HTTP. That is the agreed interface. A native mobile client is not in this repository.
-- The `users` table is not hash-partitioned. PostgreSQL unique constraints on a partitioned table must include the partition key, and email must stay unique without being part of `user_id`. All tenant tables (`audio_files`, `transcripts`, `analyses`, `prompt_configs`, `rollup_summaries`) are `PARTITION BY HASH (user_id)`.
+- The `users` table is not hash-partitioned. PostgreSQL unique constraints on a partitioned table must include the partition key, and email must stay unique without being part of `user_id`. All tenant tables (`audio_files`, `transcripts`, `analyses`, `prompt_configs`, `rollup_summaries`, `file_events`) are `PARTITION BY HASH (user_id)`.
 - Duration and RMS are computed for 16-bit PCM WAV only. Other accepted types are stored and transcribed. Their Layer 2 energy step returns `skipped` with reason `wav_pcm16_required`. There is no ffmpeg in the image.
 - On-demand rollup is synchronous in the API, using the same `run_rollup` function as the scheduler, so the screen can show the result immediately.
 - Analysis queue messages all invoke the full pipeline. `llm-layer1` and `llm-layer2` are provisioned and routed by the dispatcher, and documented as the split point.
-- Mock taxonomy is keyword and sentence heuristics. It is deterministic so the demo and tests do not need API keys. It is not a substitute for `gpt-4.1-mini` quality.
+- Mock taxonomy is keyword and sentence heuristics. It is deterministic so the demo and tests do not need API keys. It is not a substitute for `gpt-5-mini` quality.
 - The sample is a 4 second tone, not speech. In mock mode the transcript is a fixed script, so words per minute on that file is high (about 79 words in 4 seconds). Duration (4.0) and RMS are measured from the samples. Say this in the demo.
 - `home_region` is stored. A global email directory across regions is described in the scaling doc and is not implemented.
 - Schema changes are an idempotent SQL script applied at startup. There is no migration tool.
+- Assistant chat history is kept in the Streamlit session and the last eight turns are sent with the question. It is not stored in Postgres.
+- The mock chat agent chooses one tool with keyword rules. Azure mode asks `gpt-5-mini` for a tool call, then for a JSON reply. Both paths use the same LangGraph and the same three tools.
+- The Container App is not on a private link. API Management Basic cannot join a virtual network, and Front Door Standard cannot private-link to it. The ingress allowlist plus the `X-Azure-FDID` check is the lock that is feasible on this tier.
 
 ## Demo video
 
