@@ -11,6 +11,7 @@ import httpx
 from langgraph.graph import END, StateGraph
 from sqlalchemy.orm import Session
 
+from app.analysis.providers.azure import chat_sampling_fields
 from app.analysis.tracing import analysis_span
 from app.chat.prompts import (
     CHAT_REPLY_SCHEMA,
@@ -275,7 +276,7 @@ def _azure_chat(messages: list[dict], tools: list[dict] | None, schema: dict | N
         f"{settings.azure_openai_chat_deployment}/chat/completions"
         f"?api-version={settings.azure_openai_api_version}"
     )
-    body: dict = {"messages": messages, "temperature": 0}
+    body: dict = {"messages": messages, **chat_sampling_fields()}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"

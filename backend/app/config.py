@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,7 +25,8 @@ class Settings(BaseSettings):
     azure_openai_api_key: str = ""
     azure_openai_api_version: str = "2025-03-01-preview"
     azure_openai_transcribe_deployment: str = "gpt-4o-transcribe"
-    azure_openai_chat_deployment: str = "gpt-4.1-mini"
+    azure_openai_chat_deployment: str = "gpt-5-mini"
+    azure_openai_chat_temperature: float | None = None
 
     azure_content_safety_endpoint: str = ""
     azure_content_safety_key: str = ""
@@ -54,6 +56,15 @@ class Settings(BaseSettings):
     mock_stage_delay_sec: float = 0.0
     max_upload_bytes: int = 20 * 1024 * 1024
     home_region: str = "local"
+
+    @field_validator("azure_openai_chat_temperature", mode="before")
+    @classmethod
+    def blank_chat_temperature(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 @lru_cache

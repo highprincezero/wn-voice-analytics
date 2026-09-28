@@ -123,7 +123,8 @@ def test_azure_chat_requests_structured_output(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "azure_openai_endpoint", "https://example.openai.azure.com")
     monkeypatch.setattr(settings, "azure_openai_api_key", "test-key")
-    monkeypatch.setattr(settings, "azure_openai_chat_deployment", "gpt-4.1-mini")
+    monkeypatch.setattr(settings, "azure_openai_chat_deployment", "gpt-5-mini")
+    monkeypatch.setattr(settings, "azure_openai_chat_temperature", None)
     monkeypatch.setattr(settings, "azure_openai_api_version", "2025-03-01-preview")
     captured = {}
 
@@ -165,9 +166,69 @@ def test_azure_chat_requests_structured_output(monkeypatch):
     monkeypatch.setattr("app.analysis.providers.azure.httpx.Client", FakeClient)
     result = AzureIntelligence().summarize_and_classify("close the budget")
     assert result["taxonomy"]["professional_topics"] == ["budget"]
-    assert "gpt-4.1-mini" in captured["url"]
+    assert "gpt-5-mini" in captured["url"]
+    assert "temperature" not in captured["json"]
+    assert "max_tokens" not in captured["json"]
     assert captured["headers"]["api-key"] == "test-key"
     schema = captured["json"]["response_format"]["json_schema"]
     assert schema["strict"] is True
     assert schema["schema"]["additionalProperties"] is False
     assert captured["json"]["messages"][0]["content"] == LAYER1_SYSTEM_PROMPT
+
+
+def test_azure_chat_sends_temperature_only_when_set(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "azure_openai_endpoint", "https://example.openai.azure.com")
+    monkeypatch.setattr(settings, "azure_openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "azure_openai_chat_deployment", "gpt-5-mini")
+    monkeypatch.setattr(settings, "azure_openai_chat_temperature", 0.4)
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"summary":"ok","taxonomy":{"professional_topics":[],'
+                                '"personal_topics":[],"upcoming_events":[]}}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, headers=None, json=None, data=None, files=None):
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.analysis.providers.azure.httpx.Client", FakeClient)
+    AzureIntelligence().summarize_and_classify("close the budget")
+    assert captured["json"]["temperature"] == 0.4
+    assert "max_tokens" not in captured["json"]
+    assert captured["json"]["response_format"]["type"] == "json_schema"
+
+
+def test_blank_chat_temperature_setting_is_unset():
+    from app.config import Settings
+
+    blank = Settings.model_validate({"azure_openai_chat_temperature": ""})
+    assert blank.azure_openai_chat_temperature is None
+    spaces = Settings.model_validate({"azure_openai_chat_temperature": "  "})
+    assert spaces.azure_openai_chat_temperature is None
+    set_value = Settings.model_validate({"azure_openai_chat_temperature": "0.4"})
+    assert set_value.azure_openai_chat_temperature == 0.4

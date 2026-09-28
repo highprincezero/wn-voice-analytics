@@ -18,7 +18,7 @@ Say, in your own words, what is on screen. The beats below are the points to hit
 
 Show the title and the mock-mode caption.
 
-Say: this is a voice analytics proof of concept. The browser talks to a Streamlit client. That client calls a separate FastAPI service. Audio goes to blob storage under the user id. A worker runs a LangGraph pipeline: duration, transcript, content safety, summary, taxonomy, and the Layer 2 options the user picked. Today the models are deterministic stand-ins so the stack runs without API keys. The same graph calls Azure OpenAI `gpt-4o-transcribe` and `gpt-4.1-mini` when `LLM_PROVIDER=azure`.
+Say: this is a voice analytics proof of concept. The browser talks to a Streamlit client. That client calls a separate FastAPI service. Audio goes to blob storage under the user id. A worker runs a LangGraph pipeline: duration, transcript, content safety, summary, taxonomy, and the Layer 2 options the user picked. Today the models are deterministic stand-ins so the stack runs without API keys. The same graph calls Azure OpenAI `gpt-4o-transcribe` for speech and `gpt-5-mini` for analysis and chat when `LLM_PROVIDER=azure`. Both sit on one Azure OpenAI resource.
 
 ## 0:40 – 1:20  Sign up
 

@@ -52,7 +52,7 @@ If the check blocks, the file status becomes `blocked`, the reason is stored, th
 
 ### 4. Structured output and a second validation
 
-Azure chat calls set `response_format` to a strict JSON schema (`additionalProperties: false`, required fields listed). Duration is not requested from the model. It is measured from the file.
+Azure chat calls set `response_format` to a strict JSON schema (`additionalProperties: false`, required fields listed). The request omits `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set. `gpt-5-mini` rejects an explicit temperature of 0. Duration is not requested from the model. It is measured from the file.
 
 After the graph finishes, Pydantic validates:
 

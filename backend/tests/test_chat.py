@@ -204,3 +204,49 @@ def test_mock_provider_does_not_call_azure(client, auth, monkeypatch):
     )
     assert response.status_code == 200, response.text
     assert calls == []
+
+
+def test_chat_agent_omits_temperature_unless_set(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "azure_openai_endpoint", "https://example.openai.azure.com")
+    monkeypatch.setattr(settings, "azure_openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "azure_openai_chat_deployment", "gpt-5-mini")
+    monkeypatch.setattr(settings, "azure_openai_chat_temperature", None)
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"reply":"ok"}'}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.chat.agent.httpx.Client", FakeClient)
+    from app.chat.agent import _azure_chat
+
+    _azure_chat([{"role": "user", "content": "hi"}], None, {"type": "object", "properties": {}})
+    assert "gpt-5-mini" in captured["url"]
+    assert "temperature" not in captured["json"]
+    assert "max_tokens" not in captured["json"]
+    assert captured["json"]["response_format"]["type"] == "json_schema"
+
+    monkeypatch.setattr(settings, "azure_openai_chat_temperature", 0.2)
+    _azure_chat([{"role": "user", "content": "hi"}], None, None)
+    assert captured["json"]["temperature"] == 0.2
+    assert "max_tokens" not in captured["json"]
+    assert "response_format" not in captured["json"]

@@ -60,7 +60,7 @@ flowchart TB
     LG[LangGraph analysis pipeline]
     CHAT[LangGraph chat agent]
     STT[gpt-4o-transcribe]
-    LLM[gpt-4.1-mini structured output]
+    LLM[gpt-5-mini structured output]
     CS[Content Safety Prompt Shields]
     FEAT[RMS energy and spaCy]
   end
@@ -90,7 +90,7 @@ Longer write-up: [docs/architecture.md](docs/architecture.md).
 
 ### Analysis pipeline
 
-LangGraph order: measure duration, transcribe, content safety, then either one structured summary or a map-reduce over chunks, then the selected Layer 2 options, then schema validation, then persist. A blocked transcript is stored and the chat model is not called.
+LangGraph order: measure duration, transcribe, content safety, then either one structured summary or a map-reduce over chunks, then the selected Layer 2 options, then schema validation, then persist. A blocked transcript is stored and the chat model is not called. Speech-to-text uses `gpt-4o-transcribe`. Analysis and the chat agent use `gpt-5-mini`. Both deployments are on one Azure OpenAI resource. Chat requests omit `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set, because this model rejects a temperature of 0. JSON replies still use `response_format`.
 
 ![Analysis pipeline](docs/diagrams/analysis-pipeline.png)
 
@@ -295,7 +295,7 @@ terraform init
 terraform plan
 ```
 
-`regions` defaults to eastus and westeurope. Add or remove entries to change N. Each entry builds a `region_stack` module: resource group, VNet, Postgres Flexible Server (zone-redundant HA and geo-redundant backups), GZRS blob storage, Redis Standard, Key Vault, Service Bus Standard (four queues), Log Analytics, Application Insights, Azure OpenAI (`gpt-4o-transcribe` and `gpt-4.1-mini`), Content Safety, a zone-redundant Container Apps environment (API and worker), a cron rollup job, and API Management Basic. A global resource group holds Azure Front Door. Each origin is that region's API Management gateway, which forwards to the Container App. The API ingress allowlists API Management's public IPs.
+`regions` defaults to eastus and westeurope. Add or remove entries to change N. Each entry builds a `region_stack` module: resource group, VNet, Postgres Flexible Server (zone-redundant HA and geo-redundant backups), GZRS blob storage, Redis Standard, Key Vault, Service Bus Standard (four queues), Log Analytics, Application Insights, Azure OpenAI (`gpt-4o-transcribe` and `gpt-5-mini`), Content Safety, a zone-redundant Container Apps environment (API and worker), a cron rollup job, and API Management Basic. A global resource group holds Azure Front Door. Each origin is that region's API Management gateway, which forwards to the Container App. The API ingress allowlists API Management's public IPs.
 
 Validate without credentials:
 
@@ -322,7 +322,7 @@ The API publishes analysis work to the `transcription` queue. The worker command
 
 ## Environment variables
 
-See [.env.example](.env.example). Compose already exports the mock-mode set.
+See [.env.example](.env.example). Compose reads a repo-root `.env` for the API and worker. Mock mode is the default and needs no keys. Set `LLM_PROVIDER=azure`, `SAFETY_PROVIDER=azure`, and the endpoint and key in that file to call Azure.
 
 | Variable | Local default | Meaning |
 | --- | --- | --- |
@@ -340,7 +340,8 @@ See [.env.example](.env.example). Compose already exports the mock-mode set.
 | `AZURE_OPENAI_API_KEY` | empty | Required when `LLM_PROVIDER=azure` |
 | `AZURE_OPENAI_API_VERSION` | `2025-03-01-preview` | Chat and transcription API version |
 | `AZURE_OPENAI_TRANSCRIBE_DEPLOYMENT` | `gpt-4o-transcribe` | Speech deployment name |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` | Structured-output deployment name |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-5-mini` | Analysis and chat deployment name |
+| `AZURE_OPENAI_CHAT_TEMPERATURE` | empty | Optional. Unset omits temperature. This model rejects 0. |
 | `AZURE_CONTENT_SAFETY_ENDPOINT` | empty | Required when `SAFETY_PROVIDER=azure` |
 | `AZURE_CONTENT_SAFETY_KEY` | empty | Required when `SAFETY_PROVIDER=azure` |
 | `CONTENT_SAFETY_BLOCK_SEVERITY` | 4 | Block at this Azure severity or higher |
@@ -407,7 +408,7 @@ Written design: [docs/guardrails.md](docs/guardrails.md).
 
 ## Cost, trade-offs, future work
 
-Transcription minutes dominate cost at the planning case (about 900,000 minutes per region per month if every registered user uploads one 3 minute file a day). `gpt-4.1-mini`, Content Safety, Postgres, and Container Apps are smaller lines. Multiply by N. Figures and the assumptions behind them are in [docs/scaling.md](docs/scaling.md). Recheck the Azure price sheet before using them as a budget.
+Transcription minutes dominate cost at the planning case (about 900,000 minutes per region per month if every registered user uploads one 3 minute file a day). `gpt-5-mini`, Content Safety, Postgres, and Container Apps are smaller lines. Multiply by N. Figures and the assumptions behind them are in [docs/scaling.md](docs/scaling.md). Recheck the Azure price sheet before using them as a budget.
 
 Trade-offs in this POC:
 
@@ -429,12 +430,12 @@ Later: stage-split workers, ffmpeg so compressed audio gets real duration and RM
 - Duration and RMS are computed for 16-bit PCM WAV only. Other accepted types are stored and transcribed. Their Layer 2 energy step returns `skipped` with reason `wav_pcm16_required`. There is no ffmpeg in the image.
 - On-demand rollup is synchronous in the API, using the same `run_rollup` function as the scheduler, so the screen can show the result immediately.
 - Analysis queue messages all invoke the full pipeline. `llm-layer1` and `llm-layer2` are provisioned and routed by the dispatcher, and documented as the split point.
-- Mock taxonomy is keyword and sentence heuristics. It is deterministic so the demo and tests do not need API keys. It is not a substitute for `gpt-4.1-mini` quality.
+- Mock taxonomy is keyword and sentence heuristics. It is deterministic so the demo and tests do not need API keys. It is not a substitute for `gpt-5-mini` quality.
 - The sample is a 4 second tone, not speech. In mock mode the transcript is a fixed script, so words per minute on that file is high (about 79 words in 4 seconds). Duration (4.0) and RMS are measured from the samples. Say this in the demo.
 - `home_region` is stored. A global email directory across regions is described in the scaling doc and is not implemented.
 - Schema changes are an idempotent SQL script applied at startup. There is no migration tool.
 - Assistant chat history is kept in the Streamlit session and the last eight turns are sent with the question. It is not stored in Postgres.
-- The mock chat agent chooses one tool with keyword rules. Azure mode asks `gpt-4.1-mini` for a tool call, then for a JSON reply. Both paths use the same LangGraph and the same three tools.
+- The mock chat agent chooses one tool with keyword rules. Azure mode asks `gpt-5-mini` for a tool call, then for a JSON reply. Both paths use the same LangGraph and the same three tools.
 - The Container App is not on a private link. API Management Basic cannot join a virtual network, and Front Door Standard cannot private-link to it. The ingress allowlist plus the `X-Azure-FDID` check is the lock that is feasible on this tier.
 
 ## Demo video

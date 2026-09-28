@@ -96,7 +96,7 @@ Blob ingress is not the bottleneck at this planning case. Playback is smaller st
 
 ## Workers and context limits
 
-`CHUNK_CHARS` defaults to 4000 characters. A transcript under that size is one structured call to `gpt-4.1-mini`. A longer transcript is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent. Topics found on any chunk are unioned back in, so the reduce step cannot drop them. Duration is computed locally and is not part of the model context.
+`CHUNK_CHARS` defaults to 4000 characters. A transcript under that size is one structured call to `gpt-5-mini`. A longer transcript is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent. Topics found on any chunk are unioned back in, so the reduce step cannot drop them. Duration is computed locally and is not part of the model context.
 
 Queues in each region:
 
@@ -126,7 +126,7 @@ The rollup job is a Container Apps Job on `*/15 * * * *`. It also runs when a us
 | Blob | GZRS, private container, versioning on | Zone and geo copies of objects. Reads stay in the home region until a storage failover is started. 10,000 * 2 MB = 20 GB/day. |
 | Service Bus | Standard, four queues | 0.56 messages/s does not need Premium. Standard is not zone redundant. Premium is the zone and private-network step, and it is a large fixed cost at this rate. |
 | Redis | Standard C1 | Rate-limit counter and a short cache. It is not the production queue. Standard is not zone redundant. Premium Redis is not used for the same cost reason. |
-| Azure OpenAI | `gpt-4o-transcribe` and `gpt-4.1-mini`, Global Standard | Hosted API. Self-hosting a transcriber would remove the per-minute fee and add GPU capacity we do not need at 0.56 files/s. |
+| Azure OpenAI | `gpt-4o-transcribe` and `gpt-5-mini`, Global Standard | One resource. `gpt-4o-transcribe` is speech-to-text. `gpt-5-mini` is analysis and chat. Hosted API. Self-hosting a transcriber would remove the per-minute fee and add GPU capacity we do not need at 0.56 files/s. |
 | Content Safety | S0 | Prompt Shields and category analysis in front of the model and on chat input |
 | Front Door | One global Standard profile | Entry in front of API Management. The app stores `home_region` and should stick a user to that region. |
 | Container Apps | Zone-redundant environment, consumption, apps subnet `/23` | Replicas can land in more than one zone. `/23` is the minimum for a consumption-only environment. |
@@ -143,7 +143,7 @@ These are order-of-magnitude illustrations for **one region** at the planning ca
 | Item | Rough monthly shape |
 | --- | --- |
 | Transcription | 10,000 files/day * 3 min * 30 days = 900,000 minutes. At a few tenths of a cent to about a cent per minute, this is the largest line, on the order of several thousand dollars. |
-| `gpt-4.1-mini` | About 2 calls * 2k tokens * 10k files * 30 days. Mini pricing makes this hundreds of dollars, not thousands, unless map-reduce expands long files. |
+| `gpt-5-mini` | About 2 calls * 2k tokens * 10k files * 30 days. Mini pricing makes this hundreds of dollars, not thousands, unless map-reduce expands long files. |
 | Content Safety | 300k text records/month. Often on the order of a few hundred dollars. |
 | Postgres D4ds with zone-redundant HA | About twice the single-server compute, because the standby is a second server. A few hundred dollars becomes closer to the high hundreds. Geo-redundant backup adds paired-region backup storage on top. |
 | Container Apps | Low hundreds at this replica count. Zone redundancy on the environment does not by itself add a second SKU. |

@@ -29,7 +29,7 @@ flowchart TB
     LG[LangGraph analysis pipeline]
     CHAT[LangGraph chat agent]
     STT[gpt-4o-transcribe]
-    LLM[gpt-4.1-mini structured output]
+    LLM[gpt-5-mini structured output]
     CS[Content Safety Prompt Shields]
     FEAT[RMS energy and spaCy]
   end
@@ -83,7 +83,7 @@ The chat route builds a LangGraph with three nodes: plan, tools, and compose. Th
 
 `user_id` comes from the JWT. It is not a tool argument. A file id that belongs to someone else is `not_found`. The tools do not return the raw transcript. Summaries and taxonomy are the data the reply is allowed to use.
 
-When `LLM_PROVIDER=mock`, the plan node matches the question to one tool with fixed rules, the tools node runs it, and the compose node writes a deterministic reply from the tool result. When `LLM_PROVIDER=azure`, the plan node asks `gpt-4.1-mini` for one tool call and the compose node asks for a JSON object `{"reply": "..."}`, which Pydantic checks. A schema failure falls back to the same rule-based reply. One tool runs per question.
+When `LLM_PROVIDER=mock`, the plan node matches the question to one tool with fixed rules, the tools node runs it, and the compose node writes a deterministic reply from the tool result. When `LLM_PROVIDER=azure`, the plan node asks `gpt-5-mini` for one tool call and the compose node asks for a JSON object `{"reply": "..."}`, which Pydantic checks. A schema failure falls back to the same rule-based reply. One tool runs per question.
 
 Streamlit keeps the transcript of the chat in session state and sends at most the last eight turns. The server does not store that history.
 
@@ -91,7 +91,9 @@ Streamlit keeps the transcript of the chat in session state and sends at most th
 
 LangGraph is the orchestrator. Duration is measured from the WAV header and samples, not guessed by the model. Transcription uses `gpt-4o-transcribe` when `LLM_PROVIDER=azure`, or a deterministic stand-in when `LLM_PROVIDER=mock`. Content Safety runs before any summary call. If the transcript is blocked, the model is not called.
 
-Summaries use one structured call when the transcript fits in `CHUNK_CHARS` (default 4000). Longer transcripts are map-reduced: each chunk returns a partial summary and topic lists, then a reduce call merges them. Topic lists are unioned so a later chunk cannot be dropped. `gpt-4.1-mini` is asked for JSON that matches a strict JSON schema. The API checks that payload again with Pydantic before it is stored.
+Speech-to-text uses `gpt-4o-transcribe`. Analysis and the chat agent use `gpt-5-mini`. Both deployments are on one Azure OpenAI resource. Requests to the chat deployment omit `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set, because this model rejects an explicit temperature of 0. JSON replies still use `response_format`.
+
+Summaries use one structured call when the transcript fits in `CHUNK_CHARS` (default 4000). Longer transcripts are map-reduced: each chunk returns a partial summary and topic lists, then a reduce call merges them. Topic lists are unioned so a later chunk cannot be dropped. `gpt-5-mini` is asked for JSON that matches a strict JSON schema. The API checks that payload again with Pydantic before it is stored.
 
 Layer 2 runs only the options stored on the user. Those options come from a server-side catalog. RMS and speaking pace are computed in-process. Nouns and adjectives come from spaCy `en_core_web_sm`. Sentiment uses a fixed lexicon. None of these steps accept a free-form system prompt.
 

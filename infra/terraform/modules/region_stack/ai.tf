@@ -24,13 +24,13 @@ resource "azurerm_cognitive_deployment" "transcribe" {
 }
 
 resource "azurerm_cognitive_deployment" "chat" {
-  name                 = "gpt-4.1-mini"
+  name                 = "gpt-5-mini"
   cognitive_account_id = azurerm_cognitive_account.openai.id
 
   model {
     format  = "OpenAI"
-    name    = "gpt-4.1-mini"
-    version = "2025-04-14"
+    name    = "gpt-5-mini"
+    version = "2025-08-07"
   }
 
   sku {
