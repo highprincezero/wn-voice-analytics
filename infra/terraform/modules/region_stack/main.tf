@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 data "azurerm_client_config" "current" {}
 
 resource "azurerm_resource_group" "this" {

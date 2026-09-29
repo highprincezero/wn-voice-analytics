@@ -19,21 +19,26 @@ from app.db.base import Base
 from app.db.types import json_doc
 from app.timeutil import utcnow
 
-_STATUSES = ("uploaded", "processing", "completed", "blocked", "failed")
 
-
+# Declarative model: subclassing Base maps this class to the `users` table.
+# users is NOT partitioned, so email stays unique across the whole region.
 class User(Base):
     __tablename__ = "users"
 
+    # SQLAlchemy 2.0 style: Mapped[...] is the Python type, mapped_column() the DB column.
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # unique=True + index=True: one account per email, fast login lookup.
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     home_region: Mapped[str] = mapped_column(String(64), default="local")
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
 
 
+# Tenant table: in Postgres it is hash-partitioned by user_id (16 partitions, see
+# sql/001_schema.sql and db/partitions.py). ORM code queries the parent table as usual.
 class AudioFile(Base):
     __tablename__ = "audio_files"
+    # __table_args__: table-level constraints (here a CHECK on allowed status values).
     __table_args__ = (
         CheckConstraint(
             "status IN ('uploaded', 'processing', 'completed', 'blocked', 'failed')",
@@ -41,15 +46,19 @@ class AudioFile(Base):
         ),
     )
 
+    # Composite primary key (user_id, id): a partitioned table's PK must include the
+    # partition key. ondelete=CASCADE removes a user's rows when the user is deleted.
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
+    # default=uuid.uuid4 is a Python-side default applied on INSERT.
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     original_filename: Mapped[str] = mapped_column(Text)
     content_type: Mapped[str] = mapped_column(Text)
     byte_size: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64))
     storage_key: Mapped[str] = mapped_column(Text)
+    # `float | None` + nullable=True: optional column (filled in after analysis).
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="uploaded")
     stage: Mapped[str] = mapped_column(String(32), default="upload")
@@ -59,8 +68,11 @@ class AudioFile(Base):
 
 class Transcript(Base):
     __tablename__ = "transcripts"
+    # One transcript per file (unique on user_id + file_id).
     __table_args__ = (
         UniqueConstraint("user_id", "file_id", name="transcripts_file_uq"),
+        # Composite foreign key to audio_files' composite PK; deleting the file cascades here.
+        # No relationship() is defined - the code joins explicitly by (user_id, file_id).
         ForeignKeyConstraint(
             ["user_id", "file_id"],
             ["audio_files.user_id", "audio_files.id"],
@@ -104,6 +116,7 @@ class Analysis(Base):
     status: Mapped[str] = mapped_column(String(32))
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # json_doc(): JSONB on Postgres, plain JSON on SQLite (see db/types.py).
     taxonomy: Mapped[dict | None] = mapped_column(json_doc(), nullable=True)
     layer2: Mapped[dict | None] = mapped_column(json_doc(), nullable=True)
     block_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -116,6 +129,7 @@ class Analysis(Base):
 class PromptConfig(Base):
     __tablename__ = "prompt_configs"
 
+    # One prompt config per user, so user_id alone is the primary key.
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
@@ -148,6 +162,7 @@ class RollupSummary(Base):
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
 
 
+# Append-only progress log per file (what the UI timeline shows).
 class FileEvent(Base):
     __tablename__ = "file_events"
     __table_args__ = (
@@ -170,12 +185,9 @@ class FileEvent(Base):
     file_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True))
     filename: Mapped[str] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text)
+    # seq orders events within a file.
     seq: Mapped[int] = mapped_column(BigInteger)
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     level: Mapped[str] = mapped_column(String(16), default="info")
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
-
-
-ALLOWED_FILE_STATUSES = _STATUSES
-PIPELINE_STAGES = ("upload", "queued", "transcribe", "safety", "layer1", "layer2", "saved")

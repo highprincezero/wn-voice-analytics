@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 resource "azurerm_virtual_network" "this" {
   name                = "vnet-${var.name_prefix}-${var.region_name}"
   location            = azurerm_resource_group.this.location

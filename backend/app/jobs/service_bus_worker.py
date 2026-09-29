@@ -1,4 +1,6 @@
-"""Long-running production worker.
+"""Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
+
+Long-running production worker.
 
 Local compose uses Celery. This process is the Container Apps command: it reads
 Azure Service Bus queues and calls the same job functions.

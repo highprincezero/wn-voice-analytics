@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 resource "azurerm_postgresql_flexible_server" "this" {
   name                          = "psql-${var.name_prefix}-${var.region_name}"
   resource_group_name           = azurerm_resource_group.this.name

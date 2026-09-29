@@ -11,9 +11,12 @@ from app.db.models import Analysis, AudioFile
 from app.guardrails.safety import get_safety
 from app.jobs.summary_job import run_rollup
 
+# Allow-list of tool names the agent may call.
 TOOL_NAMES = frozenset({"search_files", "get_analysis", "run_summary"})
 _SEARCH_LIMIT = 20
 
+# Tool schemas in OpenAI function-calling format: name, description, and JSON Schema
+# parameters. Sent to the model so it knows which tools exist and how to call them.
 TOOL_SPECS = [
     {
         "type": "function",
@@ -25,6 +28,7 @@ TOOL_SPECS = [
             ),
             "parameters": {
                 "type": "object",
+                # additionalProperties: False = the model can't invent extra arguments.
                 "additionalProperties": False,
                 "properties": {
                     "date_from": {"type": "string", "description": "ISO timestamp, inclusive"},
@@ -127,6 +131,7 @@ def _file_payload(audio: AudioFile, analysis: Analysis | None) -> dict:
     }
 
 
+# Tool implementation: every query is filtered by user_id (tenant isolation).
 def search_files(db: Session, user_id: uuid.UUID, args: SearchFilesArgs) -> dict:
     start = _naive(args.date_from)
     end = _naive(args.date_to)
@@ -138,6 +143,7 @@ def search_files(db: Session, user_id: uuid.UUID, args: SearchFilesArgs) -> dict
         and args.min_duration > args.max_duration
     ):
         return {"error": "invalid_arguments"}
+    # Free-text filter is screened by content safety before it's used.
     if args.taxonomy and get_safety().analyze_content(args.taxonomy).blocked:
         return {"error": "rejected"}
     query = db.query(AudioFile).filter(AudioFile.user_id == user_id)
@@ -161,9 +167,11 @@ def search_files(db: Session, user_id: uuid.UUID, args: SearchFilesArgs) -> dict
         ):
             continue
         matched.append(_file_payload(audio, analysis))
+    # Result capped at _SEARCH_LIMIT items to keep the LLM prompt small.
     return {"items": matched[:_SEARCH_LIMIT], "total": len(matched)}
 
 
+# Tool implementation: one file's analysis, only if it belongs to this user.
 def get_analysis(db: Session, user_id: uuid.UUID, args: GetAnalysisArgs) -> dict:
     audio = (
         db.query(AudioFile)
@@ -180,6 +188,7 @@ def get_analysis(db: Session, user_id: uuid.UUID, args: GetAnalysisArgs) -> dict
     return _file_payload(audio, analysis)
 
 
+# Tool implementation: on-demand rollup, trimmed so it fits in the prompt.
 def run_summary(db: Session, user_id: uuid.UUID, args: RunSummaryArgs) -> dict:
     try:
         row = run_rollup(
@@ -209,12 +218,14 @@ def run_summary(db: Session, user_id: uuid.UUID, args: RunSummaryArgs) -> dict:
     return result
 
 
+# Tool name -> Pydantic model that validates that tool's arguments.
 _MODELS = {
     "search_files": SearchFilesArgs,
     "get_analysis": GetAnalysisArgs,
     "run_summary": RunSummaryArgs,
 }
 
+# Tool name -> Python function that implements it (the dispatch table).
 _FUNCS = {
     "search_files": search_files,
     "get_analysis": get_analysis,
@@ -222,12 +233,15 @@ _FUNCS = {
 }
 
 
+# Single dispatcher: validate arguments, then call the mapped function.
 def execute_tool(db: Session, user_id: uuid.UUID, name: str, arguments: dict) -> dict:
     if name not in TOOL_NAMES:
         return {"error": "unknown_tool"}
     model = _MODELS[name]
     try:
+        # model_validate turns the raw dict into typed args (or raises ValidationError).
         parsed = model.model_validate(arguments or {})
     except ValidationError:
         return {"error": "invalid_arguments"}
+    # Looks up the function by name and calls it with (db, user_id, parsed args).
     return _FUNCS[name](db, user_id, parsed)

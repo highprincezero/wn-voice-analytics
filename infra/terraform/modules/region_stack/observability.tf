@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 resource "azurerm_log_analytics_workspace" "this" {
   name                = "law-${var.name_prefix}-${var.region_name}"
   location            = azurerm_resource_group.this.location

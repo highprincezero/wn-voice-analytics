@@ -15,8 +15,10 @@ from app.timeutil import utcnow
 logger = logging.getLogger(__name__)
 
 
+# Entry point called by the upload route: picks how the analysis job gets run.
 def enqueue_analysis(file_id: uuid.UUID, user_id: uuid.UUID) -> None:
     settings = get_settings()
+    # Branch 1 - inline mode: run the pipeline right here in the API process (no queue).
     if settings.analysis_mode == "inline":
         mark_queued(file_id, user_id, "Analysis started inline (no queue)")
         try:
@@ -24,21 +26,29 @@ def enqueue_analysis(file_id: uuid.UUID, user_id: uuid.UUID) -> None:
         except Exception:
             logger.exception("inline analysis failed for %s", file_id)
         return
+    # Job message payload (used by the Service Bus branch).
     body = {"kind": "analyze_file", "file_id": str(file_id), "user_id": str(user_id)}
+    # Branch 2 - Azure Service Bus: publish the job message to the 'transcription' queue.
     if settings.broker == "servicebus":
+        # Lazy import: only loaded when this broker is configured.
         from app.jobs.publisher import publish_job
 
         mark_queued(file_id, user_id, "Job queued on Service Bus (transcription)")
         publish_job("transcription", body)
         return
+    # Branch 3 (default) - Celery. Lazy import avoids a circular import:
+    # tasks.py imports run_file_analysis from this module.
     from app.jobs.tasks import analyze_file_task
 
     task_id = str(uuid.uuid4())
     mark_queued(file_id, user_id, f"Job queued (task id {task_id})")
+    # apply_async sends the task to the broker; a worker picks it up and calls it.
     analyze_file_task.apply_async((str(file_id), str(user_id)), task_id=task_id)
 
 
+# The actual job body (runs in the worker): load file -> run graph -> persist results.
 def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) -> None:
+    # A fresh DB session per job; closed in the finally block below.
     db = SessionLocal()
     try:
         uid = uuid.UUID(str(user_id))
@@ -52,6 +62,7 @@ def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) ->
         audio.status = "processing"
         audio.error_message = None
         db.commit()
+        # track(): context manager that records progress events/stages for the UI.
         with track(db, audio) as tracker:
             pickup = "Worker picked up the job"
             if task_id:
@@ -63,6 +74,7 @@ def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) ->
                 config = db.query(PromptConfig).filter(PromptConfig.user_id == uid).one_or_none()
                 raw_options = list(config.selections) if config is not None else []
                 options = validate_selections(raw_options) if raw_options else []
+                # Runs the LangGraph pipeline and returns the final state dict.
                 state = run_graph(
                     audio_bytes=payload,
                     filename=audio.original_filename,
@@ -71,6 +83,7 @@ def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) ->
                 _persist(db, audio, state, tracker)
                 db.commit()
             except Exception as exc:
+                # Undo partial writes, then mark the file as failed in a clean transaction.
                 db.rollback()
                 failed = (
                     db.query(AudioFile)
@@ -89,11 +102,13 @@ def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) ->
                     )
                     db.commit()
                 logger.exception("analysis failed for %s", file_id)
+                # Re-raise so the Celery task can decide whether to retry.
                 raise
     finally:
         db.close()
 
 
+# Writes the transcript + analysis to blob storage and upserts the DB rows.
 def _persist(db, audio: AudioFile, state: dict, tracker) -> None:
     blocked = bool(state.get("blocked"))
     audio.duration_sec = float(state.get("duration_sec") or 0)
@@ -115,6 +130,7 @@ def _persist(db, audio: AudioFile, state: dict, tracker) -> None:
         .filter(Transcript.user_id == audio.user_id, Transcript.file_id == audio.id)
         .one_or_none()
     )
+    # Upsert: insert a new row the first time, otherwise update the existing one.
     if transcript is None:
         transcript = Transcript(
             user_id=audio.user_id,

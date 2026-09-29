@@ -1,6 +1,7 @@
 import httpx
 
 
+# Raised for any non-2xx response so the UI can show the server's error message.
 class ApiError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
@@ -8,30 +9,38 @@ class ApiError(Exception):
         self.detail = detail
 
 
+# Thin wrapper over the backend REST API (one method per endpoint).
 class ApiClient:
     def __init__(self, base_url: str, token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
 
     def _headers(self) -> dict[str, str]:
+        # Sends the login token as 'Authorization: Bearer <token>' once logged in.
         if not self.token:
             return {}
         return {"Authorization": f"Bearer {self.token}"}
 
+    # Single place every call goes through: builds the URL, adds auth, handles errors.
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        # httpx.request(method, url, ...): one-off synchronous HTTP call (no client reuse).
         response = httpx.request(
             method,
             f"{self.base_url}{path}",
             headers=self._headers(),
             timeout=60,
+            # **kwargs passes json=/params=/files= through to httpx.
             **kwargs,
         )
+        # is_success = any 2xx status.
         if response.is_success:
             return response
         detail = response.text
         try:
+            # FastAPI errors look like {"detail": ...}; pull that out for a readable message.
             body = response.json()
             parsed = body.get("detail", detail)
+            # 422 validation errors come back as a list of {msg, loc, ...} items.
             if isinstance(parsed, list):
                 detail = "; ".join(
                     item.get("msg", str(item)) if isinstance(item, dict) else str(item)
@@ -60,10 +69,12 @@ class ApiClient:
         return self._request("GET", "/api/v1/auth/me").json()
 
     def upload(self, files: list[tuple[str, bytes]]) -> dict:
+        # Multipart upload: repeated 'files' fields, each a (filename, bytes, content-type) tuple.
         payload = [("files", (name, data, "audio/wav")) for name, data in files]
         return self._request("POST", "/api/v1/files", files=payload).json()
 
     def list_files(self, params: dict) -> dict:
+        # Drop empty filters so they aren't sent as query params.
         cleaned = {key: value for key, value in params.items() if value not in (None, "")}
         return self._request("GET", "/api/v1/files", params=cleaned).json()
 

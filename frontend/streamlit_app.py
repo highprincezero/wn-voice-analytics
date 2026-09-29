@@ -8,32 +8,71 @@ import streamlit as st
 from api_client import ApiClient, ApiError
 from assistant_ui import render_assistant
 
+# Must be the first Streamlit call on the page: title, icon, layout.
 st.set_page_config(
     page_title="Voice Analytics",
     page_icon="🎙",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
-st.markdown(
-    """
+# Compact CSS for the Batch Process view, injected with st.markdown(unsafe_allow_html=True).
+# Streamlit now tags layout blocks with data-testid attributes; the old
+# "section.main > div.block-container" selector no longer matches anything.
+CLASSIC_CSS = """
     <style>
-    section.main > div.block-container {
+    [data-testid="stMainBlockContainer"] {
         max-width: 440px;
         padding-top: 1.1rem;
         padding-left: 1rem;
         padding-right: 1rem;
     }
-    div.stButton > button { width: 100%; min-height: 44px; }
-    h1 { font-size: 1.55rem; margin-bottom: 0.2rem; }
+    /* Full-width buttons. Streamlit wraps each button in a fit-content element
+       container, so widen the wrappers too. Tertiary (link-style) buttons such as
+       "Back to Assistant" keep their natural width. */
+    [data-testid="stElementContainer"]:has([data-testid="stButton"] button:not([kind="tertiary"])),
+    [data-testid="stElementContainer"]:has([data-testid="stFormSubmitButton"]),
+    [data-testid="stButton"]:has(button:not([kind="tertiary"])),
+    [data-testid="stFormSubmitButton"],
+    [data-testid="stFormSubmitButton"] > div {
+        width: 100% !important;
+    }
+    [data-testid="stButton"] button:not([kind="tertiary"]),
+    [data-testid="stFormSubmitButton"] button { width: 100% !important; min-height: 44px; }
+    [data-testid="stHeading"] h1 {
+        font-size: 1.55rem !important; margin-bottom: 0.2rem; padding-bottom: 0.2rem;
+    }
+    /* 16px inputs stop iOS from zooming in on focus. */
+    textarea, input, select { font-size: 16px !important; }
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        overflow-x: hidden;
+    }
+    /* Page switcher: one scrollable row instead of wrapping. */
+    [data-testid="stRadio"] [role="radiogroup"] {
+        flex-wrap: nowrap; overflow-x: auto; gap: 0.2rem 0.9rem; padding-bottom: 2px;
+    }
+    [data-testid="stRadio"] label { white-space: nowrap; }
+    /* Phones: use the full width and let wide tables scroll sideways. */
+    @media (max-width: 768px) {
+        [data-testid="stMainBlockContainer"] {
+            max-width: 100%;
+            padding-top: 0.6rem;
+            padding-left: 0.8rem;
+            padding-right: 0.8rem;
+        }
+        [data-testid="stHeading"] h1 { font-size: 1.35rem !important; }
+        [data-testid="stDataFrame"], [data-testid="stTable"] { overflow-x: auto; }
+        [data-testid="stTabs"] [role="tablist"] { width: 100%; }
+        [data-testid="stTabs"] [role="tab"] { flex: 1 1 0; justify-content: center; }
+    }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+    """
 
+# Backend URL; in Docker Compose this points at the api service.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 SAMPLE_PATH = Path(__file__).resolve().parent / "samples" / "sample_call.wav"
 
 
+# st.session_state persists across reruns (Streamlit re-executes this script on every click).
 def client() -> ApiClient:
     return ApiClient(API_BASE_URL, st.session_state.get("token"))
 
@@ -42,16 +81,35 @@ def show_error(exc: ApiError) -> None:
     st.error(exc.detail)
 
 
+# Initialise session defaults only once per browser session.
+if "ui_mode" not in st.session_state:
+    st.session_state["ui_mode"] = "Assistant"
 if "nav" not in st.session_state:
     st.session_state["nav"] = "Library"
 if "polls" not in st.session_state:
     st.session_state["polls"] = 0
 
+# Deferred navigation: a widget's key can't be changed after it renders, so pages
+# set 'goto' and it's applied here, before the nav radio is created.
 destination = st.session_state.pop("goto", None)
 if destination:
     st.session_state["nav"] = destination
 
-st.title("Voice Analytics")
+assistant_view = bool(st.session_state.get("token")) and st.session_state["ui_mode"] == "Assistant"
+if not assistant_view:
+    st.markdown(CLASSIC_CSS, unsafe_allow_html=True)
+    if st.session_state.get("token"):
+        st.button(
+            "Back to Assistant",
+            key="to-assistant",
+            type="tertiary",
+            icon=":material/arrow_back:",
+            # on_click callback runs before the next rerun, so the mode switch takes effect at once.
+            on_click=lambda: st.session_state.update(ui_mode="Assistant"),
+        )
+    # Logged in, this is the Batch Process view; logged out, it is the login page.
+    st.title("Batch Process" if st.session_state.get("token") else "Voice Analytics")
+# Health/config check against the API; st.stop() halts the script if it's down.
 try:
     meta = ApiClient(API_BASE_URL).meta()
 except ApiError as exc:
@@ -61,18 +119,17 @@ except Exception as exc:
     st.error(f"API unavailable at {API_BASE_URL}: {exc}")
     st.stop()
 
-if meta["llm_provider"] == "mock":
-    st.caption("Mock mode is on. Speech-to-text and summaries use deterministic stand-ins.")
-else:
-    st.caption(f"Providers: {meta['llm_provider']} / {meta['safety_provider']}.")
+if not assistant_view:
+    if meta["llm_provider"] == "mock":
+        st.caption("Mock mode is on. Speech-to-text and summaries use deterministic stand-ins.")
+    else:
+        st.caption(f"Providers: {meta['llm_provider']} / {meta['safety_provider']}.")
 
-with st.sidebar:
-    st.radio("Mode", ["Classic", "Assistant"], key="ui_mode")
-    st.caption("Classic is the library, upload, prompts, rollup, and account pages.")
-
+# Not logged in: show login/signup tabs and stop rendering the rest of the app.
 if not st.session_state.get("token"):
     login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
     with login_tab:
+        # st.form batches the inputs: nothing reruns until the submit button is pressed.
         with st.form("login"):
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_password")
@@ -82,8 +139,11 @@ if not st.session_state.get("token"):
                 except ApiError as exc:
                     show_error(exc)
                 else:
+                    # Keep the access token in session_state so later API calls are authenticated.
                     st.session_state["token"] = body["access_token"]
                     st.session_state["goto"] = "Library"
+                    st.session_state["ui_mode"] = "Assistant"
+                    # st.rerun() restarts the script immediately so the logged-in view renders.
                     st.rerun()
     with signup_tab:
         with st.form("signup"):
@@ -97,13 +157,16 @@ if not st.session_state.get("token"):
                 else:
                     st.session_state["token"] = body["access_token"]
                     st.session_state["goto"] = "Prompts"
+                    st.session_state["ui_mode"] = "Assistant"
                     st.rerun()
     st.stop()
 
+# Default experience: the assistant UI (assistant_ui.py) renders the whole page.
 if st.session_state.get("ui_mode") == "Assistant":
-    render_assistant(client(), SAMPLE_PATH)
+    render_assistant(client(), SAMPLE_PATH, meta)
     st.stop()
 
+# key="nav" binds the radio's value to st.session_state["nav"].
 page = st.radio(
     "Navigate",
     ["Library", "Upload", "Prompts", "Rollup", "Account"],
@@ -120,6 +183,7 @@ def end_of_day(value: date) -> str:
 if page == "Upload":
     st.subheader("Upload")
     st.write("WAV files are measured locally. Analysis starts as soon as the upload is stored.")
+    # st.file_uploader: browser file picker; returns UploadedFile objects (or None).
     uploads = st.file_uploader(
         "Audio files",
         type=["wav", "mp3", "m4a", "ogg", "flac"],
@@ -127,6 +191,7 @@ if page == "Upload":
     )
     if st.button("Upload selected") and uploads:
         try:
+            # getvalue() returns the uploaded file's bytes.
             client().upload([(item.name, item.getvalue()) for item in uploads])
         except ApiError as exc:
             show_error(exc)
@@ -228,12 +293,14 @@ elif page == "Rollup":
         except ApiError as exc:
             show_error(exc)
         else:
+            # Store the result in session_state so it survives the next rerun.
             st.session_state["latest_rollup"] = created
     latest = st.session_state.get("latest_rollup")
     if latest:
         result = latest["result"]
         st.write(result.get("overall_summary") or "No recordings in this range.")
         for group in result.get("groups") or []:
+            # st.container(border=True): a bordered card grouping one result.
             with st.container(border=True):
                 st.markdown(f"**{group['key']}** · {group['file_count']} file(s)")
                 st.write(group["summary"])
@@ -256,12 +323,14 @@ elif page == "Account":
     st.write(f"**User id** `{profile['id']}`")
     st.write(f"**Home region** {profile['home_region']}")
     st.caption("Audio, transcripts, and analysis are stored under this user id.")
+    # Log out = wipe the whole session (token included), then rerun to the login screen.
     if st.button("Log out"):
         st.session_state.clear()
         st.rerun()
 
 else:
     st.subheader("Library")
+    # st.expander: collapsible section to keep the filters out of the way.
     with st.expander("Filters"):
         use_from = st.checkbox("From date")
         date_from = st.date_input("From", disabled=not use_from)
@@ -295,6 +364,7 @@ else:
         st.stop()
     items = listing["items"]
     st.caption(f"{listing['total']} file(s)")
+    # Any file still uploaded/processing means the list needs refreshing.
     pending = any(item["status"] in {"uploaded", "processing"} for item in items)
     if pending:
         st.info("Analysis is running.")
@@ -326,6 +396,7 @@ else:
                 bits.append(f"rms {layer2['rms_energy']['rms_mean']}")
             if bits:
                 st.caption(" · ".join(str(bit) for bit in bits if bit))
+            # Remember which file's transcript is open across reruns.
             if st.button("Transcript", key=f"open-{item['id']}"):
                 st.session_state["open_file"] = item["id"]
             if st.session_state.get("open_file") == item["id"]:
@@ -342,6 +413,8 @@ else:
                     show_error(exc)
                 else:
                     st.rerun()
+    # Simple polling: while analysis is running, sleep and rerun the script to refresh,
+    # capped at 20 polls so the page doesn't refresh forever.
     if pending:
         st.session_state["polls"] = st.session_state.get("polls", 0) + 1
         if st.session_state["polls"] < 20:

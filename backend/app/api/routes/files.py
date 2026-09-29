@@ -25,6 +25,7 @@ from app.storage.keys import (
 )
 from app.timeutil import utcnow
 
+# APIRouter(prefix=...): every route below is mounted under /files (then /api/v1 on top).
 router = APIRouter(prefix="/files", tags=["files"])
 
 
@@ -61,6 +62,7 @@ def _file_item(audio: AudioFile, analysis: Analysis | None) -> dict:
     }
 
 
+# Tenant isolation: always filter by user_id so users can only see their own files.
 def _owned_file(db: Session, user: User, file_id: uuid.UUID) -> AudioFile:
     audio = (
         db.query(AudioFile)
@@ -68,13 +70,17 @@ def _owned_file(db: Session, user: User, file_id: uuid.UUID) -> AudioFile:
         .one_or_none()
     )
     if audio is None:
+        # HTTPException: FastAPI turns this into an HTTP error response (404 JSON body).
         raise HTTPException(status_code=404, detail="Not found")
     return audio
 
 
+# POST /api/v1/files (201 on success); async because it awaits upload.read().
 @router.post("", status_code=201)
 async def upload_files(
+    # UploadFile + File(...): multipart/form-data upload; `...` means the field is required.
     files: list[UploadFile] = File(...),
+    # Depends(...): FastAPI calls these first and injects the results (auth user, DB session).
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -90,6 +96,7 @@ async def upload_files(
             ext = safe_extension(filename)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Reads the whole uploaded file into memory as bytes.
         data = await upload.read()
         if not data:
             raise HTTPException(status_code=400, detail="empty file")
@@ -98,6 +105,7 @@ async def upload_files(
         file_id = uuid.uuid4()
         key = audio_key(user.id, file_id, ext)
         assert_user_key(user.id, key)
+        # Store raw audio in blob storage; the DB row only keeps the storage key.
         get_blob_store().upload(key, data, CONTENT_TYPES[ext])
         audio = AudioFile(
             user_id=user.id,
@@ -111,11 +119,13 @@ async def upload_files(
             stage="upload",
             created_at=utcnow(),
         )
+        # Commit first so the row exists before the worker looks it up.
         db.add(audio)
         db.commit()
         append_event(db, audio, "File uploaded and saved to blob storage", stage="upload")
         append_event(db, audio, "Row inserted in Postgres", stage="upload")
         db.commit()
+        # Hand off to inline run / Celery / Service Bus (see analysis/service.py).
         enqueue_analysis(file_id, user.id)
         db.refresh(audio)
         analysis = (
@@ -135,6 +145,7 @@ def list_files(
     max_duration: float | None = None,
     taxonomy: str | None = None,
     custom: str | None = None,
+    # Query(...) adds validation for query-string params (ge/le = min/max).
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
@@ -174,6 +185,7 @@ def list_files(
     return {"items": items[offset : offset + limit], "total": total}
 
 
+# {file_id} is a path parameter; typing it as uuid.UUID makes FastAPI validate it (422).
 @router.get("/{file_id}")
 def get_file(
     file_id: uuid.UUID,
@@ -206,9 +218,11 @@ def download_audio(
     audio = _owned_file(db, user, file_id)
     assert_user_key(user.id, audio.storage_key)
     data = get_blob_store().download(audio.storage_key)
+    # Streams the raw bytes back with the original content type.
     return Response(content=data, media_type=audio.content_type)
 
 
+# Re-run the pipeline for an existing file.
 @router.post("/{file_id}/analyze")
 def reanalyze(
     file_id: uuid.UUID,
@@ -231,6 +245,7 @@ def reanalyze(
     return _file_item(audio, analysis)
 
 
+# 204 No Content: success with an empty body.
 @router.delete("/{file_id}", status_code=204)
 def delete_file(
     file_id: uuid.UUID,

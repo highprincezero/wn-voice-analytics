@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 resource "azurerm_cognitive_account" "openai" {
   name                  = "oai-${var.name_prefix}-${var.region_name}"
   location              = var.openai_location

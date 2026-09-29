@@ -1,3 +1,5 @@
+> Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
+
 # Terraform
 
 Azure layout for N regions. `N` is `length(var.regions)`. The default list is eastus (`eus`) and westeurope (`weu`).

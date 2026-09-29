@@ -27,6 +27,7 @@ infra/terraform/    Azure Terraform, one module per region
 docker-compose.yml  API, Streamlit, Postgres, Redis, worker, Azurite
 .github/workflows/  Lint, pytest, terraform fmt and validate
 DEMO_SCRIPT.md      5 to 7 minute screen-recording script
+docs/glossary.md    Root artifacts: local or cloud (Azure)
 ```
 
 ## Architecture
@@ -157,6 +158,8 @@ flowchart TB
 ```
 
 Capacity math, cost notes, trade-offs, and future work: [docs/scaling.md](docs/scaling.md).
+
+Image path from the application to each region's Container Apps: [docs/diagrams/deploy-path.md](docs/diagrams/deploy-path.md).
 
 Planning case for one region (10,000 registered users, 2,000 concurrent, one 3 minute file per user per day, 80% of uploads in a 4 hour peak):
 

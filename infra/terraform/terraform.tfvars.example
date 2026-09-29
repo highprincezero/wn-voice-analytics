@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 name_prefix         = "vanpoc01"
 global_location     = "eastus"
 db_admin_password   = "replace-with-a-url-safe-password"

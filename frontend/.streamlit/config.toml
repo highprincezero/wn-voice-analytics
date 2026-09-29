@@ -7,10 +7,18 @@ enableXsrfProtection = true
 [browser]
 gatherUsageStats = false
 
+[client]
+toolbarMode = "minimal"
+
 [theme]
 base = "light"
-primaryColor = "#0F6E6E"
-backgroundColor = "#F6F8F8"
-secondaryBackgroundColor = "#E7EEEE"
-textColor = "#14222B"
+primaryColor = "#3A5BE8"
+backgroundColor = "#F5F7FC"
+secondaryBackgroundColor = "#EEF1F8"
+textColor = "#1F2330"
+linkColor = "#3A5BE8"
+borderColor = "#E3E7F1"
+showWidgetBorder = true
+baseRadius = "0.75rem"
+buttonRadius = "0.75rem"
 font = "sans serif"

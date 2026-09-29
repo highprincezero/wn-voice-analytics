@@ -1,14 +1,19 @@
+# Compose project name (prefixes container, network and volume names).
 name: voice-analytics
 
+# x- keys are ignored by Compose, so they can hold reusable YAML.
+# &app-env defines an anchor: this env map is reused below via *app-env.
 x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://voice:voice@postgres:5432/voice
   JWT_SECRET: dev-only-secret-change-me-please
   JWT_EXPIRE_MINUTES: "1440"
+  # ${VAR:-default}: take VAR from the shell/.env file, else use the default.
   LLM_PROVIDER: ${LLM_PROVIDER:-mock}
   SAFETY_PROVIDER: ${SAFETY_PROVIDER:-mock}
   BLOB_PROVIDER: azurite
   ANALYSIS_MODE: celery
   BROKER: celery
+  # Well-known Azurite (local storage emulator) dev key, not a real secret.
   AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
   AZURE_STORAGE_CONTAINER: voice
   AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
@@ -17,6 +22,7 @@ x-app-env: &app-env
   AZURE_OPENAI_TRANSCRIBE_DEPLOYMENT: ${AZURE_OPENAI_TRANSCRIBE_DEPLOYMENT:-gpt-4o-transcribe}
   AZURE_OPENAI_CHAT_DEPLOYMENT: ${AZURE_OPENAI_CHAT_DEPLOYMENT:-gpt-5-mini}
   AZURE_OPENAI_CHAT_TEMPERATURE: ${AZURE_OPENAI_CHAT_TEMPERATURE:-}
+  # Separate Redis DBs: 0 = Celery broker, 1 = results, 2 = rate limiter.
   CELERY_BROKER_URL: redis://redis:6379/0
   CELERY_RESULT_BACKEND: redis://redis:6379/1
   REDIS_URL: redis://redis:6379/2
@@ -42,6 +48,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Healthcheck: other services can wait until Postgres actually accepts connections.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U voice -d voice"]
       interval: 5s
@@ -60,6 +67,7 @@ services:
 
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite
+    # command: overrides the image's default start command.
     command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --location /data --debug /data/debug.log
     ports:
       - "10000:10000"
@@ -67,12 +75,16 @@ services:
       - azurite:/data
 
   api:
+    # build.context: directory sent to Docker to build the image (uses backend/Dockerfile).
     build:
       context: ./backend
     environment:
+      # <<: *app-env merges the shared env map into this service's environment.
       <<: *app-env
     ports:
+      # host:container port mapping.
       - "8000:8000"
+    # depends_on + condition: wait for dependencies to be healthy (not just started).
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +92,7 @@ services:
         condition: service_healthy
       azurite:
         condition: service_started
+    # API is healthy once /api/v1/health responds; worker and web wait on this.
     healthcheck:
       test:
         [
@@ -91,23 +104,34 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+      # Grace period before failed checks count against retries.
       start_period: 20s
 
   worker:
+    # Same image as the api, different process.
     build:
       context: ./backend
+    # Command override: run a Celery worker with an embedded beat scheduler instead of uvicorn.
     command: celery -A app.jobs.celery_app worker --beat --loglevel=info --concurrency=2
     environment:
+      # Shared env plus worker-only telemetry/tracing keys below.
       <<: *app-env
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+      OTEL_ENABLED: "true"
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
     depends_on:
       api:
         condition: service_healthy
 
   web:
+    # Build context is the repo root so the Dockerfile can also copy samples/.
     build:
       context: .
       dockerfile: frontend/Dockerfile
     environment:
+      # Service names resolve as hostnames on the Compose network.
       API_BASE_URL: http://api:8000
     ports:
       - "8501:8501"
@@ -115,6 +139,133 @@ services:
       api:
         condition: service_healthy
 
+  # ---------- Self-hosted Langfuse v3 (LLM tracing) ----------
+  langfuse-db-init:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: voice
+    # One-shot job: create the langfuse database if it doesn't exist, then exit.
+    entrypoint: ["sh", "-c"]
+    command:
+      # `>` is a folded YAML block: the lines are joined into one shell command.
+      - >
+        psql -h postgres -U voice -d voice -tAc "SELECT 1 FROM pg_database WHERE datname='langfuse'" | grep -q 1
+        || createdb -h postgres -U voice langfuse
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Don't restart after it exits.
+    restart: "no"
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse-dev}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    entrypoint: ["sh", "-c"]
+    command: ["mkdir -p /data/langfuse && minio server --address ':9000' --console-address ':9001' /data"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-minio-dev-secret}
+    ports:
+      - "9090:9000"
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    # &langfuse-env anchors this env map so langfuse-web can reuse it.
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://voice:voice@postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-dev-salt-change-me}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse-dev}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_CONNECTION_STRING: redis://redis:6379/2
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-minio-dev-secret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-minio-dev-secret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+    # &langfuse-deps anchors the dependency list, reused by langfuse-web.
+    depends_on: &langfuse-deps
+      langfuse-db-init:
+        # Wait for the one-shot init job to finish with exit code 0.
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    environment:
+      # Reuse the worker's env, then add/override web-only keys.
+      <<: *langfuse-env
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-nextauth-secret-change-me}
+      LANGFUSE_INIT_ORG_ID: voice-org
+      LANGFUSE_INIT_ORG_NAME: Voice Analytics
+      LANGFUSE_INIT_PROJECT_ID: voice-analytics
+      LANGFUSE_INIT_PROJECT_NAME: voice-analytics
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local-dev}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@local.dev}
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-admin-dev-password}
+    ports:
+      - "3000:3000"
+    # *langfuse-deps: alias for the same depends_on block as langfuse-worker.
+    depends_on: *langfuse-deps
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+# Named volumes: data persists across container restarts/rebuilds.
 volumes:
   pgdata:
   azurite:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:

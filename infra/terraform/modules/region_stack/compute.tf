@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 locals {
   database_url = "postgresql+psycopg://voiceadmin:${var.db_admin_password}@${azurerm_postgresql_flexible_server.this.fqdn}:5432/voice?sslmode=require"
   redis_url    = "rediss://:${urlencode(azurerm_redis_cache.this.primary_access_key)}@${azurerm_redis_cache.this.hostname}:${azurerm_redis_cache.this.ssl_port}/0"

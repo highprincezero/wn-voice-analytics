@@ -25,6 +25,7 @@ from app.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
+# Regexes used by the rule-based (mock) planner to pull filters out of the question.
 _UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -43,6 +44,7 @@ _TAXONOMY = re.compile(
 )
 
 
+# Chat graph state: the question, the chosen tool + args, the tool output, and the reply.
 class ChatState(TypedDict, total=False):
     message: str
     history: list
@@ -102,6 +104,7 @@ def _wants_rollup(text: str) -> bool:
     return any(token in text for token in ("summarize", "summary", "rollup", "group by"))
 
 
+# Mock-mode planner: keyword rules decide which tool to call and with what arguments.
 def plan_with_rules(message: str) -> dict:
     text = message.lower()
     found = _UUID.findall(message)
@@ -136,14 +139,17 @@ def plan_with_rules(message: str) -> dict:
     return {"intent": "help", "tool_name": "", "arguments": {}}
 
 
+# Parses the model's tool call: OpenAI format message.tool_calls[0].function.{name,arguments}.
 def interpret_tool_message(message: dict) -> dict:
     calls = message.get("tool_calls") or []
     if not calls:
         return {"intent": "help", "tool_name": "", "arguments": {}}
     function = (calls[0] or {}).get("function") or {}
     name = str(function.get("name") or "")
+    # Allow-list check: only our three tools can ever be executed.
     if name not in TOOL_NAMES:
         return {"intent": "help", "tool_name": "", "arguments": {}, "error": "unknown_tool"}
+    # The model returns arguments as a JSON string, so decode it.
     raw = function.get("arguments") or "{}"
     try:
         arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
@@ -154,6 +160,7 @@ def interpret_tool_message(message: dict) -> dict:
     return {"intent": "model", "tool_name": name, "arguments": arguments}
 
 
+# Validates the model's JSON reply with Pydantic and returns the reply text.
 def parse_structured_reply(payload: dict) -> str:
     return ChatReplyBody.model_validate(payload).reply.strip()
 
@@ -211,6 +218,7 @@ def _compose_intent(intent: str, tool_name: str, message: str) -> str:
     return "help"
 
 
+# Deterministic reply builder; also the fallback if the LLM compose step fails.
 def compose_with_rules(intent: str, tool_result: dict) -> str:
     if tool_result.get("error") == "not_found":
         return "I could not find that recording on your account."
@@ -267,6 +275,7 @@ def compose_with_rules(intent: str, tool_result: dict) -> str:
     )
 
 
+# Raw REST chat call; optionally advertises tools and/or forces a JSON schema reply.
 def _azure_chat(messages: list[dict], tools: list[dict] | None, schema: dict | None) -> dict:
     settings = get_settings()
     if not settings.azure_openai_endpoint or not settings.azure_openai_api_key:
@@ -277,6 +286,7 @@ def _azure_chat(messages: list[dict], tools: list[dict] | None, schema: dict | N
         f"?api-version={settings.azure_openai_api_version}"
     )
     body: dict = {"messages": messages, **chat_sampling_fields()}
+    # Tool calling: send the tool schemas; tool_choice="auto" lets the model decide.
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -289,9 +299,11 @@ def _azure_chat(messages: list[dict], tools: list[dict] | None, schema: dict | N
     with httpx.Client(timeout=60) as client:
         response = client.post(url, headers=headers, json=body)
     response.raise_for_status()
+    # Returns the assistant message (either content or tool_calls).
     return response.json()["choices"][0]["message"]
 
 
+# Step 1 with the LLM: the model picks a tool (function calling) from TOOL_SPECS.
 def plan_with_azure(message: str, history: list[dict]) -> dict:
     message_body = _azure_chat(build_planner_messages(message, history), TOOL_SPECS, None)
     choice = interpret_tool_message(message_body)
@@ -300,6 +312,7 @@ def plan_with_azure(message: str, history: list[dict]) -> dict:
     return choice
 
 
+# Step 3 with the LLM: turn the tool result into a user-facing answer (structured JSON).
 def compose_with_azure(message: str, tool_name: str, tool_result: dict) -> str:
     message_body = _azure_chat(
         build_compose_messages(message, tool_name, tool_result),
@@ -310,7 +323,10 @@ def compose_with_azure(message: str, tool_name: str, tool_result: dict) -> str:
     return parse_structured_reply(json.loads(content))
 
 
+# Builds the agent graph: plan -> (tools) -> compose -> END. One tool call per turn,
+# not an open-ended loop. Nodes are closures so they can use db/user_id.
 def build_chat_graph(db: Session, user_id: uuid.UUID):
+    # Node 1: decide which tool (if any) to call; LLM in azure mode, rules in mock mode.
     def plan(state: ChatState) -> ChatState:
         with analysis_span("chat.plan"):
             if get_settings().llm_provider == "azure":
@@ -323,6 +339,7 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
             logger.info("chat plan user=%s tool=%s", user_id, state["tool_name"] or "none")
         return state
 
+    # Node 2: run the chosen tool, always scoped to the caller's user_id.
     def tools(state: ChatState) -> ChatState:
         with analysis_span("chat.tool"):
             state["tool_result"] = execute_tool(
@@ -333,6 +350,7 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
             )
         return state
 
+    # Node 3: write the final reply from the tool result.
     def compose(state: ChatState) -> ChatState:
         with analysis_span("chat.compose"):
             intent = _compose_intent(
@@ -352,28 +370,34 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
                         )
                     )
                 except Exception:
+                    # If the LLM fails, fall back to the rule-based reply instead of erroring.
                     logger.warning("chat compose fell back to rules", exc_info=True)
                     state["reply"] = fallback
             else:
                 state["reply"] = fallback
         return state
 
+    # Routing function: go to 'tools' if a tool was chosen, otherwise straight to 'compose'.
     def route(state: ChatState) -> str:
         if state.get("tool_name"):
             return "tools"
         return "compose"
 
+    # StateGraph + add_node/add_edge/add_conditional_edges: same pattern as analysis/graph.py.
     graph = StateGraph(ChatState)
     graph.add_node("plan", plan)
     graph.add_node("tools", tools)
     graph.add_node("compose", compose)
     graph.set_entry_point("plan")
+    # Conditional edge: route(state)'s return value picks the next node from this map.
     graph.add_conditional_edges("plan", route, {"tools": "tools", "compose": "compose"})
     graph.add_edge("tools", "compose")
     graph.add_edge("compose", END)
+    # compile() returns the runnable graph.
     return graph.compile()
 
 
+# API entry point: invoke() runs the graph with an initial state and returns the final one.
 def run_chat_agent(db: Session, user_id: uuid.UUID, message: str, history: list[dict]) -> dict:
     result = build_chat_graph(db, user_id).invoke(
         {
@@ -386,6 +410,7 @@ def run_chat_agent(db: Session, user_id: uuid.UUID, message: str, history: list[
             "reply": "",
         }
     )
+    # Echo the tool call back to the UI so it can show which tool ran and with what.
     tool_calls = []
     if result.get("tool_name"):
         tool_calls.append(

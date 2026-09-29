@@ -4,7 +4,6 @@ import time
 from typing import Protocol
 
 from app.config import get_settings
-from app.storage.keys import assert_user_key
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +119,3 @@ def ensure_blob_container() -> None:
             time.sleep(1)
     assert last_error is not None
     raise last_error
-
-
-def download_owned(user_id: str, key: str) -> bytes:
-    assert_user_key(user_id, key)
-    return get_blob_store().download(key)

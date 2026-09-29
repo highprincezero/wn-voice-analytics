@@ -1,3 +1,4 @@
+# Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
 output "resource_group_name" {
   value = azurerm_resource_group.this.name
 }

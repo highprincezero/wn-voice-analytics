@@ -1,3 +1,5 @@
+> Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
+
 # Scaling
 
 Target: **N regions**, each with **10,000 registered users** and **2,000 concurrent users**. Regions do not share audio or analysis rows. A user has one home region.
