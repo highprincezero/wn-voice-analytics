@@ -22,3 +22,9 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# Local only. The recording script and working notes stay on this machine.
+DEMO_SCRIPT.md
+PLAN_STATUS.md
+SESSION_RECAP.md
+docker-compose.override.yml
