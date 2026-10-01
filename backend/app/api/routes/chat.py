@@ -1,3 +1,4 @@
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,6 +13,8 @@ from app.db.models import User
 from app.db.session import get_db
 from app.guardrails.safety import get_safety
 from app.guardrails.validate import GuardrailError
+
+logger = logging.getLogger(__name__)
 
 # All chat routes live under /chat.
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -37,21 +40,60 @@ class ChatRequest(BaseModel):
     session_id: uuid.UUID | None = None
 
 
-# Content-safety screen for user text before it reaches the LLM.
-def _screen(text: str) -> None:
-    if get_safety().analyze_content(text).blocked:
-        raise GuardrailError("rejected by content safety")
+BLOCKED_MESSAGE = "rejected by content safety: your message was flagged ({reason})."
+BLOCKED_HISTORY = (
+    "rejected by content safety: an earlier message of yours in this chat was flagged "
+    "({reason}). Start a new chat to continue."
+)
+_BLOCK_PREFIX = "rejected by content safety"
 
 
-def _screen_all(texts: list[str]) -> None:
-    """Screen the question and each history turn side by side. Any block rejects the turn."""
-    if len(texts) <= 1:
-        for text in texts:
-            _screen(text)
-        return
-    with ThreadPoolExecutor(max_workers=min(len(texts), 9)) as pool:
-        for future in [pool.submit(_screen, text) for text in texts]:
-            future.result()
+def _without_blocked_turns(history: list[dict]) -> list[dict]:
+    """Drop turns that were blocked (a user turn answered by a block message, and that
+    message). They never reached the model, so they are not history."""
+    kept: list[dict] = []
+    for index, turn in enumerate(history):
+        content = turn["content"].strip()
+        if turn["role"] == "assistant" and content.lower().startswith(_BLOCK_PREFIX):
+            continue
+        following = history[index + 1] if index + 1 < len(history) else None
+        if (
+            turn["role"] == "user"
+            and following is not None
+            and following["role"] == "assistant"
+            and following["content"].strip().lower().startswith(_BLOCK_PREFIX)
+        ):
+            continue
+        kept.append(turn)
+    return kept
+
+
+def _screen_turn(message: str, history: list[dict]) -> None:
+    """Content safety before the model sees anything.
+
+    The current message gets the full check: Prompt Shields plus the harm categories.
+    Earlier user turns get Prompt Shields only. Assistant replies are never screened:
+    they are our own words, and a harm score on a summary of a call (for example a
+    caller "disputing being elderly") must not block every later question.
+    """
+    earlier = [
+        (index, turn["content"])
+        for index, turn in enumerate(history)
+        if turn["role"] == "user" and turn["content"].strip()
+    ]
+    safety = get_safety()
+    with ThreadPoolExecutor(max_workers=min(len(earlier) + 1, 9)) as pool:
+        current = pool.submit(safety.analyze_content, message)
+        shields = [(index, pool.submit(safety.shield_prompt, text)) for index, text in earlier]
+        result = current.result()
+        if result.blocked:
+            logger.info("chat blocked: segment=current reason=%s", result.reason)
+            raise GuardrailError(BLOCKED_MESSAGE.format(reason=result.reason))
+        for index, future in shields:
+            found = future.result()
+            if found.blocked:
+                logger.info("chat blocked: segment=history[%s] reason=%s", index, found.reason)
+                raise GuardrailError(BLOCKED_HISTORY.format(reason=found.reason))
 
 
 # POST /api/v1/chat; `body: ChatRequest` = parsed + validated JSON request body.
@@ -66,9 +108,9 @@ def chat(
     if not message:
         raise HTTPException(status_code=400, detail="message is empty")
     history = [{"role": turn.role, "content": turn.content} for turn in body.history]
-    texts = [message] + [turn["content"] for turn in history if turn["content"].strip()]
+    history = _without_blocked_turns(history)
     try:
-        _screen_all(texts)
+        _screen_turn(message, history)
     except GuardrailError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     session = open_session(db, user.id, body.session_id)
