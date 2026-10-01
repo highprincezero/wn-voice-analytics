@@ -1,6 +1,10 @@
 import base64
 import html
+import json
+import os
+import random
 import re
+import threading
 from collections import Counter
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -34,31 +38,44 @@ _TERMINAL = {"completed", "blocked", "failed"}
 _AUDIO_TYPES = ["wav", "mp3", "m4a", "ogg", "flac"]
 _MAX_FILES = 10
 _FOLLOWUP = (
-    "All set. Ask a follow-up, for example: what upcoming events did I mention this week, "
+    "All set. Ask a follow-up, for example: summarize this recording, what topics came up, "
     "or summarize my files by topic."
+)
+# Opening lines for a first visit (no saved recordings yet). One is chosen per chat. No model call.
+_GREETINGS = (
+    "Hey there 👋 I am Audi. I can summarize your calls, search what was said, or take a new recording.",  # noqa: E501
+    "Hi, I'm Audi 🎧 Send a recording and I'll transcribe it, pull out the topics, and note any events.",  # noqa: E501
+    "Hello, Audi here ✨ I can list your saved recordings, or show how they change by day, week, or month.",  # noqa: E501
+    "Hey, I'm Audi. Ask me to group your calls by topic or sentiment, or to open one recording. 🗂️",  # noqa: E501
+    "Hi there, I am Audi 💬 I look through your calls for a summary, the speaking pace, and the sentiment.",  # noqa: E501
+    "Hello, I'm Audi. I can find calls that mention something, or list any events they bring up. 📅",  # noqa: E501
+)
+# Opening lines once this account already has a recording. Same random pick, no model call.
+_WELCOME_BACK = (
+    "Welcome back 👋 Let's continue where you left off.",
+    "Welcome back. Your recordings are still here 📂 Let's pick up where you left off.",
+    "Welcome back ✨ We can continue your calls right where you left them.",
+    "Welcome back. Ready when you are 🌟 Let's continue where you left off.",
+    "Welcome back 🙌 Let's pick up where you left off and look at your calls.",
+    "Welcome back. Your last recordings are saved ✅ Let's continue where you left off.",
 )
 _SUGGESTIONS = (
     ("Summarize my calls", ":material/summarize:", "Summarize my calls"),
     ("Upload a recording", ":material/upload_file:", None),
-    ("Which calls mention refunds?", ":material/search:", "Which calls mention refunds?"),
-    (
-        "Upcoming events this week",
-        ":material/event:",
-        "What upcoming events did I mention this week?",
-    ),
 )
 _TOOL_LABEL = {
     "search_files": "Searched recordings",
     "get_analysis": "Opened a recording",
     "run_summary": "Ran a summary",
+    "profile_speaker": "Profiled the speaker",
 }
 _STEPS = (
     ("upload", "Upload"),
     ("queued", "Queued"),
     ("transcribe", "Transcribe"),
     ("safety", "Safety check"),
-    ("layer1", "Layer 1"),
-    ("layer2", "Layer 2"),
+    ("layer1", "Insights"),
+    ("layer2", "Analytics"),
     ("saved", "Saved"),
 )
 _STEP_INDEX = {key: index for index, (key, _label) in enumerate(_STEPS)}
@@ -68,9 +85,33 @@ _INDIGO = "#3a5be8"
 _GROUP_LABEL = {
     "user": "Scope",
     "taxonomy_label": "Topic",
+    "day": "Day",
     "week": "Week",
+    "month": "Month",
     "sentiment": "Sentiment",
 }
+_TEMPLATES = (
+    ("trend", "Show the trend per …"),
+    ("by_topic", "Summarize by topic"),
+    ("by_sentiment", "Summarize by sentiment"),
+)
+_TEMPLATE_GROUP = {"by_topic": "taxonomy_label", "by_sentiment": "sentiment"}
+_BROWSE_COLUMNS = (
+    "Recording",
+    "Created",
+    "Duration (sec)",
+    "Status",
+    "Summary",
+    "Professional",
+    "Personal",
+    "Upcoming",
+    "Sentiment",
+    "Words per minute",
+    "RMS",
+    "Nouns",
+    "Adjectives",
+)
+_BROWSE_NUMERIC = frozenset({"Duration (sec)", "Words per minute", "RMS", "Nouns", "Adjectives"})
 _TOPIC_KEYS = (
     ("professional_topics", "Professional"),
     ("personal_topics", "Personal"),
@@ -82,7 +123,10 @@ _LAYER2_LABEL = {
     "rms_energy": "Loudness (RMS)",
     "pos_counts": "Nouns & adjectives",
 }
-_SKIP_TEXT = {"wav_pcm16_required": "Needs a 16-bit PCM WAV file"}
+_SKIP_TEXT = {
+    "wav_pcm16_required": "Not measured (older run, only 16-bit WAV was read); re-analyze",
+    "audio_decode_failed": "The audio could not be decoded",
+}
 _SENTIMENT_COLOR = {
     "positive": "#1a9d54",
     "negative": "#e5484d",
@@ -98,7 +142,9 @@ _STATUS_TEXT = {
     "queued": "Queued",
 }
 _LOG_KINDS = {"timeline"}
+_QUIET_KINDS = {"analysis", "topics", "checks"}
 _PANEL_HEIGHT = 600
+_ACTIVITY_PARAM = "activity"
 _PANEL_ICON = {
     "rollup": ":material/bar_chart:",
     "files": ":material/table_rows:",
@@ -201,21 +247,27 @@ textarea, input, select { font-size: 16px !important; }
 .st-key-va-header button { min-height: 36px; }
 .st-key-va-header [data-testid="stPopoverButton"] { min-height: 36px; }
 
-/* empty state */
-.va-hero { text-align: center; padding: 11vh 0 18px; }
-.va-hero .va-mark { width: 64px; height: 64px; margin: 0 auto 18px; }
-.va-hero h1 {
-  font-size: 1.9rem; font-weight: 750; color: #1f2330; margin: 0 0 6px; padding: 0;
-  letter-spacing: -0.01em;
+/* opening thread: assistant on the left, suggested replies on the right */
+.st-key-va-open { min-height: calc(100vh - 230px); justify-content: flex-end !important; }
+/* Opening line stays a short chat bubble, so the sentence wraps instead of running in one strip. */
+.va-row.assistant .va-bubble.va-greet {
+  max-width: min(320px, 78%); width: fit-content; min-width: 52px;
 }
-.va-hero p { color: #8a92a6; font-size: 1rem; margin: 0; }
-.st-key-va-chips { margin-top: 6px; }
-.st-key-va-chips button {
-  border-radius: 999px; background: #fff; border: 1px solid #e3e7f1; color: #3d4556;
-  font-size: 0.86rem; min-height: 36px; padding: 4px 14px;
-  box-shadow: 0 1px 2px rgba(20, 28, 45, .05);
+.va-caret {
+  display: inline-block; width: 2px; height: 0.95em; margin-left: 2px;
+  background: #3a5be8; vertical-align: text-bottom; border-radius: 1px;
+  animation: va-caret .9s steps(1) infinite;
 }
-.st-key-va-chips button:hover { border-color: #3a5be8; color: #3a5be8; background: #f7f8ff; }
+.st-key-va-replies { align-items: flex-end; gap: 0.35rem; margin: 8px 0 2px; }
+.st-key-va-replies [data-testid="stElementContainer"]:has(button) {
+  width: fit-content !important; margin-left: auto;
+}
+.st-key-va-replies button {
+  width: auto !important; border-radius: 18px 18px 6px 18px; background: #fff;
+  border: 1px solid #d5dcf8; color: #2c4ad4; font-size: 0.9rem; font-weight: 500;
+  min-height: 36px; padding: 6px 14px; box-shadow: 0 1px 2px rgba(20, 28, 45, .05);
+}
+.st-key-va-replies button:hover { background: #f4f6ff; border-color: #3a5be8; }
 
 /* composer */
 [data-testid="stChatInput"] {
@@ -225,7 +277,7 @@ textarea, input, select { font-size: 16px !important; }
 [data-testid="stChatInput"] > div { background: #fff !important; border-radius: 22px !important; }
 [data-testid="stChatInput"] textarea { background: transparent !important; }
 [data-testid="stBottom"] > div { background: #f5f7fc; }
-.st-key-va-hero-composer { margin-top: 8px; }
+
 
 /* thread + cards under assistant turns. st.container(height=...) sets a fixed pixel
    height on the block and on its wrapper, and both are flex items, so flex is reset
@@ -235,10 +287,35 @@ div:has(> [class*="st-key-va-thread"]), [class*="st-key-va-thread"] {
   min-height: 360px !important;
 }
 [class*="st-key-va-thread"] { border: none !important; padding: 0 2px !important; }
+/* Thinking is one short bar, not a stripe across the chat column. */
+[class*="st-key-va-thinking"] {
+  width: 220px !important; max-width: 72%;
+  flex: 0 0 auto !important; align-self: flex-start !important;
+}
+[class*="st-key-va-thinking"] [data-testid="stElementContainer"],
+[class*="st-key-va-thinking"] [data-testid="stProgress"] {
+  width: 220px !important; max-width: 100%;
+}
 .st-key-va-composer { margin-top: 6px; }
+/* Scrolling inside the chat or a log box never scrolls the page behind it. */
+[class*="st-key-va-thread"], .st-key-va-logs, .va-log { overscroll-behavior: contain; }
+/* Side panel: live log on top, activity below. The column is sticky, so the panel stays
+   put when the page or the chat scrolls. It ends where the chat ends, above the pinned
+   chat input. */
+[data-testid="stColumn"]:has(.st-key-va-side, .st-key-va-side-live) {
+  position: sticky; top: 0.75rem; align-self: flex-start;
+}
+.st-key-va-livelog {
+  background: #f6f7f9; border: 1px solid #e6e8ec; border-radius: 14px;
+  padding: 10px 12px 12px; gap: 0.4rem;
+}
+.st-key-va-livelog .va-log { max-height: 132px; }
 div:has(> .st-key-va-logs), .st-key-va-logs {
-  flex: 0 0 auto !important; height: calc(100vh - 131px) !important;
-  min-height: 434px !important;
+  flex: 0 0 auto !important; height: calc(100vh - 205px) !important;
+  min-height: 360px !important;
+}
+.st-key-va-side-live div:has(> .st-key-va-logs), .st-key-va-side-live .st-key-va-logs {
+  height: calc(100vh - 205px - 173px) !important; min-height: 200px !important;
 }
 
 /* activity column: low-key gray logs */
@@ -328,6 +405,73 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 [class*="st-key-va-turn-"] [data-testid="stExpander"] {
   margin-left: 39px; width: calc(100% - 39px) !important;
 }
+/* Transcription, Insights, and Analytics sit in one muted row. The body opens under it. */
+[class*="st-key-va-muted-row-"] {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  margin: 2px 0 6px 39px;
+  width: calc(100% - 39px) !important;
+}
+[class*="st-key-va-muted-row-"] > div,
+[class*="st-key-va-muted-row-"] [data-testid="stElementContainer"] {
+  width: fit-content !important;
+  flex: 0 0 auto !important;
+  max-width: 100%;
+}
+[class*="st-key-va-turn-"] [class*="st-key-va-muted-"] [data-testid="stExpander"] {
+  width: fit-content !important;
+  max-width: 100%;
+  margin: 0;
+}
+[class*="st-key-va-muted-"] [data-testid="stExpander"] details {
+  width: fit-content;
+  border: 1px solid #e4e7ee;
+  box-shadow: none;
+  background: #fbfcfe;
+  border-radius: 10px;
+}
+[class*="st-key-va-muted-"] [data-testid="stExpander"] summary {
+  background: transparent;
+  min-height: 0;
+  padding: 1px 4px;
+}
+[class*="st-key-va-muted-"] [data-testid="stExpander"] summary,
+[class*="st-key-va-muted-"] [data-testid="stExpander"] summary * {
+  color: #8b93a7 !important;
+  font-weight: 500;
+  font-size: 0.74rem;
+}
+[class*="st-key-va-muted-"]:not([class*="-body"]) [data-testid="stExpander"] details[open] {
+  border-color: #c5cce0;
+  background: #fff;
+}
+[class*="st-key-va-muted-"]:not([class*="-body"]) [data-testid="stExpander"] details[open] summary,
+[class*="st-key-va-muted-"]:not([class*="-body"])
+  [data-testid="stExpander"] details[open] summary * {
+  color: #243046 !important;
+  font-weight: 650;
+}
+[class*="st-key-va-muted-"][class*="-body"] {
+  margin: 4px 0 12px 39px;
+  width: calc(100% - 39px) !important;
+  background: #fff;
+  border: 1px solid #e1e5ee;
+  border-radius: 16px;
+  padding: 12px 14px 6px;
+  box-shadow: 0 1px 2px rgba(20, 28, 45, .05);
+}
+.va-result-name {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #5c6578;
+  margin: 0 0 10px;
+}
 [data-testid="stExpander"] details {
   border-radius: 14px; border-color: #e8ebf2; background: #fff;
   box-shadow: 0 1px 2px rgba(20, 28, 45, .05);
@@ -387,6 +531,96 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 .va-card-title {
   font-size: 0.72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
   color: #8a92a6; margin-bottom: 2px;
+}
+/* Next steps continue the assistant message. Keep them quiet. */
+.st-key-va-card-suggest {
+  margin: 2px 0 4px 39px !important; width: calc(100% - 39px) !important;
+  background: transparent !important;
+  border: none !important; box-shadow: none !important; padding: 0 2px !important;
+  border-radius: 0 !important; gap: 0.15rem !important;
+}
+.st-key-va-card-suggest [data-testid="stMarkdownContainer"] { margin: 0; }
+.st-key-va-card-suggest .va-card-title {
+  font-size: 0.64rem; font-weight: 600; letter-spacing: .08em; color: #b0b6c4;
+  line-height: 1.4; margin: 0;
+}
+.st-key-va-card-suggest [data-testid="stCaptionContainer"] { margin: 0 0 2px !important; }
+.st-key-va-card-suggest [data-testid="stCaptionContainer"] p {
+  color: #a3aab8; font-size: 0.76rem; line-height: 1.4; margin: 0;
+}
+.st-key-va-suggest-actions { margin-top: 0; }
+.va-grid {
+  display: flex; flex-direction: column; border: 1px solid #e8ebf2; border-radius: 12px;
+  background: #fff;
+}
+.va-grid-scroll { max-height: 380px; overflow: auto; }
+.va-grid-bar {
+  display: flex; justify-content: flex-end; gap: 6px; flex: none; padding: 4px 8px;
+  border-bottom: 1px solid #eef0f5; background: #fff;
+}
+.va-grid-bar button {
+  width: auto !important; min-height: 26px !important; height: auto !important;
+  margin: 0 !important; padding: 2px 10px !important; border: 1px solid #e6e9f2 !important;
+  border-radius: 999px !important; background: #fff !important; color: #5c6578 !important;
+  box-shadow: none !important; font-size: 0.75rem !important; font-weight: 600 !important;
+  line-height: 1.2 !important; cursor: pointer;
+}
+.va-grid.va-maxed, .va-grid:fullscreen {
+  position: fixed; inset: 0; z-index: 1000002; width: 100vw; height: 100vh;
+  max-height: none; border: 0; border-radius: 0; background: #fff;
+}
+.va-grid.va-maxed .va-grid-scroll, .va-grid:fullscreen .va-grid-scroll {
+  max-height: none; flex: 1; min-height: 0;
+}
+.va-grid table {
+  border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%;
+  font-size: 0.8rem; color: #1f2330;
+}
+.va-grid th, .va-grid td { text-align: left; vertical-align: top; }
+.va-grid th {
+  position: sticky; top: 0; z-index: 2; background: #f7f8fb;
+  border-bottom: 1px solid #e6e9f2; padding: 0; font-weight: 600;
+}
+.va-grid th:first-child, .va-grid td:first-child {
+  position: sticky; left: 0; box-shadow: 1px 0 0 #eef0f5;
+}
+.va-grid th:first-child { z-index: 3; background: #f7f8fb; }
+.va-grid td:first-child { z-index: 1; background: #fff; }
+.va-colhead {
+  display: flex; align-items: center; gap: 2px; min-width: 108px; padding: 4px 6px;
+}
+.va-grid th:nth-child(1) .va-colhead { min-width: 148px; }
+.va-grid th:nth-child(5) .va-colhead { min-width: 200px; }
+.va-grid input {
+  flex: 1; min-width: 0; border: 0; background: transparent; color: #1f2330;
+  font: inherit; font-weight: 600; font-size: 0.72rem !important; padding: 4px 2px;
+  outline: none; box-shadow: none !important;
+}
+.va-grid input::placeholder { color: #6d7589; font-weight: 600; }
+.va-grid input:focus { background: #fff; box-shadow: inset 0 -2px 0 #3a5be8 !important; }
+.va-grid thead button {
+  width: auto !important; min-height: 0 !important; height: auto !important;
+  margin: 0 !important; padding: 0 4px !important; border: 0 !important;
+  border-radius: 4px !important; background: transparent !important;
+  color: #a3aab8 !important; box-shadow: none !important;
+  font-size: 0.75rem !important; line-height: 1 !important; cursor: pointer;
+}
+.va-grid td {
+  padding: 7px 8px; border-bottom: 1px solid #f0f2f7; white-space: nowrap;
+  max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+}
+.va-grid td.va-summary { white-space: normal; min-width: 200px; max-width: 340px; }
+.va-grid p.va-none {
+  display: none; margin: 0; padding: 10px 8px 12px; text-align: center;
+  color: #8a92a6; font-size: 0.8rem;
+}
+.va-grid p.va-none.va-show { display: block; }
+.st-key-va-suggest-actions button {
+  border-radius: 999px; background: transparent; border: 1px solid transparent; color: #8b93a7;
+  font-size: 0.8rem; font-weight: 500; min-height: 30px; padding: 2px 10px; box-shadow: none;
+}
+.st-key-va-suggest-actions button:hover {
+  border-color: #e6e9f2; color: #3d4556; background: rgba(255,255,255,.75);
 }
 .va-out { font-size: 0.92rem; line-height: 1.55; color: #1f2330; }
 .va-out p { margin: 0 0 8px; }
@@ -544,20 +778,22 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
   0%, 60%, 100% { opacity: .3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-3px); }
 }
+@keyframes va-caret { 50% { opacity: 0; } }
 @keyframes va-ring {
   0%, 100% { box-shadow: 0 0 0 0 rgba(58, 91, 232, .35); }
   50% { box-shadow: 0 0 0 5px rgba(58, 91, 232, 0); }
 }
 @keyframes va-spin { to { transform: rotate(360deg); } }
-/* header items that move into the menu on small screens */
-.st-key-va-menu-new, .st-key-va-menu-classic, .st-key-va-menu-activity { display: none; }
+/* header items that move into the menu on small screens. Show activity log stays in
+   the header on every screen size. */
+.st-key-va-menu-new { display: none; }
 .st-key-va-activity label { white-space: nowrap; }
 @media (max-width: 768px) {
   [data-testid="stMainBlockContainer"] {
     padding-left: 0.8rem; padding-right: 0.8rem; padding-bottom: 90px;
   }
-  .st-key-va-new-chat, .st-key-va-classic, .st-key-va-activity { display: none; }
-  .st-key-va-menu-new, .st-key-va-menu-classic, .st-key-va-menu-activity { display: block; }
+  .st-key-va-new-chat { display: none; }
+  .st-key-va-menu-new { display: block; }
   .va-title { font-size: 1rem; }
   .va-mark { width: 38px; height: 38px; flex-basis: 38px; }
   /* stack the chat and activity columns */
@@ -570,16 +806,13 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
     height: auto !important; min-height: 0 !important; max-height: none !important;
     overflow: visible !important;
   }
-  div:has(> .st-key-va-logs), .st-key-va-logs {
+  div:has(> .st-key-va-logs), .st-key-va-logs,
+  .st-key-va-side-live div:has(> .st-key-va-logs), .st-key-va-side-live .st-key-va-logs {
     height: auto !important; min-height: 0 !important; max-height: 60vh !important;
   }
+  [data-testid="stColumn"]:has(.st-key-va-side, .st-key-va-side-live) { position: static; }
   .va-lg-empty { padding-top: 12px; }
-  /* composer pinned to the bottom of the screen */
-  .st-key-va-composer {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; margin: 0;
-    padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); background: #f5f7fc;
-    border-top: 1px solid #e8ebf2;
-  }
+  /* The chat input sits at the top level, so Streamlit pins it to the bottom. */
   [data-testid="stMetric"] { min-width: calc(50% - 6px) !important; }
   [data-testid="stTable"] { overflow-x: auto; }
   .va-transcript { max-height: 200px; }
@@ -587,11 +820,22 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 }
 @media (max-width: 768px) {
   .va-bubble { max-width: 88%; }
-  .va-hero { padding-top: 6vh; }
-  .va-hero h1 { font-size: 1.5rem; }
+  .st-key-va-open { min-height: 0; }
   [class*="st-key-va-turn-"] [data-testid="stExpander"],
   [class*="st-key-va-card-"] { margin-left: 0; width: 100% !important; }
-  .va-hero { padding-top: 4vh; }
+  [class*="st-key-va-muted-row-"] {
+    margin-left: 0;
+    width: 100% !important;
+  }
+  [class*="st-key-va-turn-"] [class*="st-key-va-muted-"] [data-testid="stExpander"] {
+    margin-left: 0;
+    width: fit-content !important;
+    max-width: 100%;
+  }
+  [class*="st-key-va-muted-"][class*="-body"] {
+    margin-left: 0;
+    width: 100% !important;
+  }
   .va-chips { margin-left: 0; }
   .va-taxrow { flex-direction: column; gap: 4px; }
   .va-taxrow .cat { flex-basis: auto; }
@@ -599,7 +843,7 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
   .va-status .va-provider { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .va-row, .va-live, .va-typing i, .va-flow .step.current,
+  .va-row, .va-live, .va-typing i, .va-caret, .va-flow .step.current,
   .st-key-va-proc-status [data-testid="stExpanderIcon"] { animation: none; }
 }
 </style>
@@ -857,10 +1101,14 @@ def _group_keys(item: dict, group_by: str) -> list[str]:
     if group_by == "sentiment":
         sentiment = ((item.get("layer2") or {}).get("sentiment_lexicon") or {}).get("label")
         return [str(sentiment or "unknown")]
-    if group_by == "week":
+    if group_by in {"day", "week", "month"}:
         created = _parse_time(item.get("created_at"))
         if created is None:
             return []
+        if group_by == "day":
+            return [created.strftime("%Y-%m-%d")]
+        if group_by == "month":
+            return [created.strftime("%Y-%m")]
         iso = created.isocalendar()
         return [f"{iso.year}-W{iso.week:02d}"]
     return ["all"]
@@ -914,25 +1162,78 @@ def _file_row(item: dict, stages: dict[str, dict]) -> dict:
     }
 
 
+_SET_WORD = re.compile(r"\b(recordings?|files?|calls?)\b")
+
+
+def _asks_for_records(prompt: str) -> bool:
+    """True when the question asks to see the set of recordings."""
+    text = " ".join(prompt.lower().split())
+    if not _SET_WORD.search(text):
+        return False
+    asks = ("list", "show", "which", "how many", "all my")
+    return any(phrase in text for phrase in asks)
+
+
+def _asks_what_it_says(prompt: str) -> bool:
+    """True when the question is about what a recording says."""
+    text = " ".join(prompt.lower().split())
+    if _asks_for_records(prompt):
+        return False
+    return any(word in text for word in ("say", "said", "saying"))
+
+
+def _asks_for_latest(prompt: str) -> bool:
+    """True when the question is for one recording, the newest."""
+    text = " ".join(prompt.lower().split())
+    if any(word in text for word in ("recordings", "files", "calls")):
+        return False
+    phrases = (
+        "latest recording",
+        "latest file",
+        "latest call",
+        "latest one",
+        "newest recording",
+        "newest file",
+        "newest call",
+        "newest one",
+        "most recent recording",
+        "most recent file",
+        "most recent call",
+        "most recent one",
+        "last recording",
+        "last file",
+        "last call",
+        "last one",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
 def _search_panels(api: ApiClient, result: dict, prompt: str) -> list[dict]:
     found = [item for item in result.get("items") or [] if isinstance(item, dict)]
+    if _asks_for_latest(prompt) or _asks_what_it_says(prompt):
+        found = found[:1]
     wants_events = any(word in prompt.lower() for word in ("upcoming", "event"))
-    if len(found) == 1 and found[0].get("id") and not wants_events:
+    wants_records = _asks_for_records(prompt)
+    one = len(found) == 1 and bool(found[0].get("id")) and not wants_events
+    if one and not wants_records:
         detail = _safe_detail(api, found[0]["id"])
         return _panels_for_detail(api, detail or found[0])
+    if not wants_records and not wants_events:
+        return []
     stages = {str(item.get("id")): item for item in _safe_files(api)} if found else {}
     rows = [_file_row(item, stages) for item in found]
     total = result.get("total")
     panels = []
     if wants_events:
         panels.append(_panel("events", "Output · Upcoming events", {"rows": rows}))
-    panels.append(
-        _panel(
-            "files",
-            "Output · Recordings",
-            {"rows": rows, "total": len(rows) if total is None else total},
+    if wants_records:
+        panels.append(
+            _panel(
+                "files",
+                "Output · Recordings",
+                {"rows": rows, "total": len(rows) if total is None else total},
+            )
         )
-    )
     return panels
 
 
@@ -999,7 +1300,7 @@ def _rollup_rows(data: dict) -> list[dict]:
                 "Summary": str(group.get("summary") or "—"),
             }
         )
-    if group_by == "week":
+    if group_by in {"day", "week", "month"}:
         rows.sort(key=lambda row: row[label])
     else:
         rows.sort(key=lambda row: (-row["Recordings"], row[label]))
@@ -1114,11 +1415,11 @@ def _check_rows(record: dict) -> list[dict]:
         }
     )
     if blocked:
-        rows.append({"Check": "Layer 1 summary", "Result": "Not run", "Status": "⏭️ Skipped"})
+        rows.append({"Check": "Insights summary", "Result": "Not run", "Status": "⏭️ Skipped"})
     elif status == "failed":
         rows.append(
             {
-                "Check": "Layer 1 summary",
+                "Check": "Insights summary",
                 "Result": str(record.get("error_message") or "Processing failed"),
                 "Status": "❌ Failed",
             }
@@ -1126,7 +1427,7 @@ def _check_rows(record: dict) -> list[dict]:
     elif record.get("summary"):
         rows.append(
             {
-                "Check": "Layer 1 summary & topics",
+                "Check": "Insights summary & topics",
                 "Result": "Schema valid",
                 "Status": "✅ Pass",
             }
@@ -1137,7 +1438,7 @@ def _check_rows(record: dict) -> list[dict]:
         result, state = _layer2_result(option, value)
         rows.append(
             {
-                "Check": f"Layer 2 · {_LAYER2_LABEL.get(option, _nice(option))}",
+                "Check": f"Analytics · {_LAYER2_LABEL.get(option, _nice(option))}",
                 "Result": result,
                 "Status": state,
             }
@@ -1272,7 +1573,7 @@ def _render_rollup(data: dict, key: str) -> None:
         return
     if len(rows) > 1:
         _section(f"Recordings per {label.lower()}")
-        if group_by == "week":
+        if group_by in {"day", "week", "month"}:
             _trend_chart(rows, label, "Recordings", "Recordings")
         else:
             colors = _SENTIMENT_COLOR if group_by == "sentiment" else None
@@ -1524,7 +1825,7 @@ def _analytics_view(data: dict) -> tuple[list[str], str]:
     notes = []
     for row in _check_rows(data):
         check = str(row["Check"])
-        if check.startswith("Layer 2"):
+        if check.startswith("Analytics"):
             continue
         if "Pass" in str(row["Status"]):
             continue
@@ -1562,12 +1863,29 @@ def _analytics_view(data: dict) -> tuple[list[str], str]:
                 _sparkline(windows),
             )
         )
+    elif energy.get("skipped"):
+        reason = str(energy["skipped"])
+        rows.append(("Loudness", "—", _SKIP_TEXT.get(reason, _nice(reason)), "", ""))
     counts = layer2.get("pos_counts") or {}
     if counts and not counts.get("skipped"):
         nouns = _word_line(counts.get("top_nouns"))
         adjectives = _word_line(counts.get("top_adjectives"))
-        detail = f"Adjectives {adjectives}" if adjectives else ""
-        rows.append(("Words", nouns or "—", detail, "", ""))
+        detail = (
+            f"{counts.get('noun_count', 0)} nouns · {counts.get('adjective_count', 0)} adjectives"
+        )
+        if nouns:
+            detail += f" · top nouns {nouns}"
+        if adjectives:
+            detail += f" · top adjectives {adjectives}"
+        rows.append(
+            (
+                "Words",
+                f"{counts.get('noun_count', 0)} N · {counts.get('adjective_count', 0)} Adj",
+                detail,
+                "",
+                "",
+            )
+        )
     return notes, _read_html(rows)
 
 
@@ -1613,6 +1931,10 @@ def _result_line(name: str, result: dict) -> str:
         return f"{filename} · {result.get('status') or 'loaded'}"
     if name == "run_summary":
         return f"{result.get('file_count', 0)} file(s) grouped by {result.get('group_by', 'user')}"
+    if name == "profile_speaker":
+        count = len(result.get("voices") or [])
+        filename = result.get("filename") or "recording"
+        return f"{filename} · {count} voice(s)"
     return "done"
 
 
@@ -1660,6 +1982,16 @@ def _steps_html(steps: list[dict]) -> str:
 # ---------------------------------------------------------------- state
 
 
+def _after_batch(prompt: str, file_ids: list[str]) -> dict:
+    """Once the files finish, run the words from the composer, or type a follow-up."""
+    text = prompt.strip()
+    if text:
+        ids = [str(item) for item in file_ids if item]
+        pinned = ids[:1] if len(ids) == 1 else []
+        return {"run": text, "files": pinned, "followup": ""}
+    return {"run": "", "files": [], "followup": _FOLLOWUP}
+
+
 def _fresh_state() -> None:
     st.session_state["assistant_messages"] = []
     st.session_state["assistant_phase"] = "ready"
@@ -1667,35 +1999,104 @@ def _fresh_state() -> None:
     st.session_state["assistant_reported"] = []
     st.session_state["assistant_pending"] = []
     st.session_state["assistant_run"] = None
+    st.session_state["assistant_queue"] = []
+    st.session_state["assistant_after_upload"] = ""
+    st.session_state["assistant_after_ids"] = []
+    st.session_state["assistant_batch_closed"] = False
+    st.session_state["assistant_followup"] = ""
+    st.session_state["assistant_run_files"] = []
+    st.session_state["assistant_run_quiet"] = False
     st.session_state["assistant_show_uploader"] = False
     st.session_state["assistant_polls"] = 0
+    st.session_state.pop("assistant_greeting", None)
+    st.session_state.pop("assistant_greeting_kind", None)
+    st.session_state.pop("assistant_typed_done", None)
+    st.session_state["assistant_typed_count"] = 0
+    st.session_state["assistant_typed_pause"] = 0
+    st.session_state.pop("assistant_typed_target", None)
     st.session_state["assistant_upload_nonce"] = (
         st.session_state.get("assistant_upload_nonce", 0) + 1
     )
+    st.session_state["assistant_session_id"] = None
+    st.session_state.pop("assistant_session_ready", None)
 
 
 def _ensure_state() -> None:
     if "assistant_messages" not in st.session_state:
         _fresh_state()
         st.session_state["assistant_audio"] = {}
-    # The live log has its own column now, so it starts switched on.
+    # The live log sits above the activity list in the side panel, so it starts on.
     st.session_state.setdefault("show_live_log", True)
-    # "Show activity" preference. setdefault only writes the first time, so a value the
-    # user picked is kept on every rerun (and when they visit Batch Process and come back).
-    st.session_state.setdefault("show_activity", True)
+    # "Show activity log" preference. A plain key, not a widget key, so no rerun, fragment
+    # run, or missing widget can clear it. The ?activity= URL value keeps it on a reload.
+    if "show_activity" not in st.session_state:
+        st.session_state["show_activity"] = st.query_params.get(_ACTIVITY_PARAM) == "1"
+    _save_activity_param()
+
+
+def _resume_session(api: ApiClient) -> None:
+    """Load the latest Postgres session once per browser visit."""
+    if st.session_state.get("assistant_session_ready"):
+        return
+    st.session_state["assistant_session_ready"] = True
+    try:
+        body = api.chat_session()
+    except ApiError:
+        return
+    session_id = body.get("session_id")
+    if session_id:
+        st.session_state["assistant_session_id"] = str(session_id)
+    if st.session_state.get("assistant_messages"):
+        return
+    restored = []
+    for item in body.get("messages") or []:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        restored.append(
+            {
+                "role": role,
+                "content": content,
+                "tools": [],
+                "artifacts": [],
+                "steps": [],
+                "files": [],
+                "at": "",
+            }
+        )
+    if restored:
+        st.session_state["assistant_messages"] = restored
 
 
 def _new_chat() -> None:
     _fresh_state()
-
-
-def _to_classic() -> None:
-    # "Classic" is the internal mode name; the screen is labelled "Batch Process".
-    st.session_state["ui_mode"] = "Classic"
+    st.session_state["assistant_session_ready"] = True
+    token = st.session_state.get("token")
+    if not token:
+        return
+    base = os.environ.get("API_BASE_URL", "http://localhost:8000")
+    try:
+        body = ApiClient(base, token).open_chat_session()
+    except ApiError:
+        return
+    session_id = body.get("session_id")
+    if session_id:
+        st.session_state["assistant_session_id"] = str(session_id)
 
 
 def _log_out() -> None:
+    # Drop the token and every chat key. The flag survives the clear so the sign-in
+    # page can reload the browser once, which stops any typing/polling fragment timers
+    # that were mid-run and starts a new session that has never held a token.
+    st.session_state.pop("token", None)
     st.session_state.clear()
+    st.session_state["va_logged_out"] = True
+
+
+def _signed_in() -> bool:
+    # Fragments keep their own timers; after Log out they must not touch chat state.
+    return bool(st.session_state.get("token")) and "assistant_messages" in st.session_state
 
 
 def _say(
@@ -1706,7 +2107,7 @@ def _say(
     steps: list[dict] | None = None,
     files: list[str] | None = None,
 ) -> None:
-    st.session_state["assistant_messages"].append(
+    st.session_state.setdefault("assistant_messages", []).append(
         {
             "role": role,
             "content": content,
@@ -1719,7 +2120,7 @@ def _say(
     )
 
 
-def _history_for_api() -> list[dict]:
+def _history_for_api(prompt: str = "") -> list[dict]:
     turns = []
     for message in st.session_state.get("assistant_messages") or []:
         content = (message.get("content") or "").strip()
@@ -1728,23 +2129,72 @@ def _history_for_api() -> list[dict]:
             content = f"{content} (attached: {names})".strip()
         if message.get("role") in {"user", "assistant"} and content:
             turns.append({"role": message["role"], "content": content[:2000]})
-    if turns and turns[-1]["role"] == "user":
-        turns = turns[:-1]
+    if prompt:
+        for index in range(len(turns) - 1, -1, -1):
+            content = turns[index]["content"]
+            attached = content == prompt or content.startswith(f"{prompt} (attached:")
+            if turns[index]["role"] == "user" and attached:
+                del turns[index]
+                break
     return turns[-8:]
+
+
+def _opening_line() -> str:
+    text = st.session_state.get("assistant_typed_done")
+    if not text:
+        text = st.session_state.get("assistant_greeting")
+    return str(text or "").strip()
+
+
+def _keep_greeting() -> None:
+    """Save the opening line before the first real turn, so the thread keeps it."""
+    if st.session_state.get("assistant_messages"):
+        return
+    text = _opening_line()
+    if text:
+        _say("assistant", text)
+
+
+def _schedule(text: str, files: list | None = None, quiet: bool = False) -> None:
+    """Keep a question that arrives while another question is still unanswered."""
+    job = {"text": text, "files": list(files or []), "quiet": quiet}
+    if st.session_state.get("assistant_run"):
+        queued = list(st.session_state.get("assistant_queue") or [])
+        queued.append(job)
+        st.session_state["assistant_queue"] = queued
+        return
+    st.session_state["assistant_run"] = text
+    st.session_state["assistant_run_files"] = job["files"]
+    st.session_state["assistant_run_quiet"] = quiet
+
+
+def _take_next_run() -> None:
+    queued = list(st.session_state.get("assistant_queue") or [])
+    if not queued or st.session_state.get("assistant_run"):
+        return
+    job = queued.pop(0)
+    st.session_state["assistant_queue"] = queued
+    st.session_state["assistant_run"] = job["text"]
+    st.session_state["assistant_run_files"] = job.get("files") or []
+    st.session_state["assistant_run_quiet"] = bool(job.get("quiet"))
 
 
 def _queue(text: str) -> None:
     text = text.strip()
     if not text:
         return
+    _keep_greeting()
     _say("user", text)
-    st.session_state["assistant_run"] = text
+    _schedule(text)
 
 
 def _attach(files: list[tuple[str, bytes]], note: str = "") -> None:
     if not files:
         return
     names = [name for name, _data in files]
+    _keep_greeting()
+    st.session_state["assistant_after_upload"] = note.strip()
+    st.session_state["assistant_batch_closed"] = False
     _say("user", note.strip(), files=names)
     st.session_state["assistant_show_uploader"] = False
     st.session_state["assistant_upload_nonce"] = (
@@ -1754,12 +2204,7 @@ def _attach(files: list[tuple[str, bytes]], note: str = "") -> None:
         _say("assistant", f"Attach at most {_MAX_FILES} files at a time.")
         return
     st.session_state["assistant_pending"] = files
-    _say(
-        "assistant",
-        f"Got {len(files)} file(s). Pick the Layer 2 options below and I'll start processing. "
-        "Leave them all off to run Layer 1 only.",
-    )
-    st.session_state["assistant_phase"] = "options"
+    st.session_state["assistant_phase"] = "uploading"
 
 
 def _submit(value) -> None:
@@ -1791,22 +2236,35 @@ def _composer(key: str) -> None:
 # ---------------------------------------------------------------- rendering
 
 
-def _sync_activity(widget_key: str) -> None:
+def _save_activity_param() -> None:
+    wanted = "1" if st.session_state.get("show_activity") else "0"
+    if st.query_params.get(_ACTIVITY_PARAM) != wanted:
+        st.query_params[_ACTIVITY_PARAM] = wanted
+
+
+_ACTIVITY_WIDGET = "va-activity"
+
+
+def _sync_activity() -> None:
     # on_change callbacks run before the rerun, so the new choice is saved first.
-    st.session_state["show_activity"] = st.session_state[widget_key]
+    st.session_state["show_activity"] = bool(st.session_state[_ACTIVITY_WIDGET])
+    _save_activity_param()
 
 
-def _activity_toggle(widget_key: str) -> None:
-    # Two toggles (header on wide screens, menu on phones) share one setting. Widget
-    # state is dropped when a widget is not drawn (e.g. on the Batch Process pages), so the
-    # choice lives in the plain "show_activity" key and each toggle is seeded from it.
-    st.session_state[widget_key] = st.session_state["show_activity"]
+def _activity_toggle() -> None:
+    # One toggle only, in the header on every screen size. A second copy in the menu
+    # kept its own browser value: once the menu had been opened, turning the header
+    # toggle off left the menu copy on, and the next click, chat, or upload sent that
+    # stale "on" back, so its on_change turned the panels on again.
+    # The toggle is seeded only when its key is missing (first run, or after a run that
+    # did not draw it). After that only the user changes it.
+    if _ACTIVITY_WIDGET not in st.session_state:
+        st.session_state[_ACTIVITY_WIDGET] = bool(st.session_state["show_activity"])
     st.toggle(
-        "Show activity",
-        key=widget_key,
+        "Show activity log",
+        key=_ACTIVITY_WIDGET,
         on_change=_sync_activity,
-        args=(widget_key,),
-        help="Show or hide the activity and log column next to the chat",
+        help="Show or hide the live log and the activity list next to the chat",
     )
 
 
@@ -1820,7 +2278,7 @@ def _header(meta: dict | None, messages: list[dict]) -> None:
     with st.container(key="va-header", horizontal=True, vertical_alignment="center", gap="small"):
         st.markdown(
             f'<div class="va-head"><div class="va-mark">{_mark(22)}</div><div>'
-            '<div class="va-title">Voice Analytics Agent</div>'
+            '<div class="va-title">Audio Analytics Agent</div>'
             f'<div class="va-status"><span class="va-live"></span>{status}</div>'
             "</div></div>",
             unsafe_allow_html=True,
@@ -1833,15 +2291,7 @@ def _header(meta: dict | None, messages: list[dict]) -> None:
             on_click=_new_chat,
             disabled=not messages,
         )
-        st.button(
-            "Batch Process",
-            key="va-classic",
-            type="tertiary",
-            icon=":material/view_list:",
-            help="Switch to Batch Process: library, upload, prompts, and rollup pages",
-            on_click=_to_classic,
-        )
-        _activity_toggle("va-activity")
+        _activity_toggle()
         with st.popover("", icon=":material/more_horiz:", key="va-menu"):
             # Shown only on small screens (CSS), where the header buttons are hidden.
             st.button(
@@ -1852,14 +2302,6 @@ def _header(meta: dict | None, messages: list[dict]) -> None:
                 disabled=not messages,
                 width="stretch",
             )
-            st.button(
-                "Batch Process",
-                key="va-menu-classic",
-                icon=":material/view_list:",
-                on_click=_to_classic,
-                width="stretch",
-            )
-            _activity_toggle("va-menu-activity")
             # The live log sits inside the activity column, so it has no effect when hidden.
             st.toggle(
                 "Live log", key="show_live_log", disabled=not st.session_state["show_activity"]
@@ -1899,6 +2341,14 @@ def _assistant_bubble(message: dict) -> str:
     return (
         f'<div class="va-row assistant"><div class="va-av">{_mark(15)}</div>'
         f'<div class="va-bubble">{_prose_html(message.get("content") or "")}</div></div>'
+    )
+
+
+def _greet_bubble(text: str, caret: bool) -> str:
+    cursor = '<span class="va-caret"></span>' if caret else ""
+    return (
+        f'<div class="va-row assistant"><div class="va-av">{_mark(15)}</div>'
+        f'<div class="va-bubble va-greet"><p>{html.escape(text)}{cursor}</p></div></div>'
     )
 
 
@@ -1942,6 +2392,39 @@ def _render_panel(api: ApiClient, panel: dict, key: str, expanded: bool) -> None
         _render_panel_body(api, panel, key)
 
 
+def _render_muted_pill(panel: dict, key: str) -> None:
+    """One gray label. The body is drawn under the row after a click."""
+    title = _panel_title(panel)
+    icon = _PANEL_ICON.get(str(panel.get("kind")), ":material/article:")
+    with st.container(key=key):
+        st.expander(
+            title,
+            expanded=False,
+            key=f"{key}-open",
+            type="compact",
+            on_change="rerun",
+            icon=icon,
+        )
+
+
+def _render_muted_row(api: ApiClient, index: int, panels: list[dict]) -> None:
+    with st.container(key=f"va-muted-row-{index}", horizontal=True, gap="small"):
+        for number, panel in enumerate(panels):
+            _render_muted_pill(panel, f"va-muted-{index}-{number}")
+    for number, panel in enumerate(panels):
+        open_key = f"va-muted-{index}-{number}-open"
+        if not st.session_state.get(open_key):
+            continue
+        body_key = f"va-muted-{index}-{number}-body"
+        label = html.escape(_panel_title(panel))
+        with st.container(key=body_key):
+            st.markdown(
+                f'<div class="va-result-name">From {label}</div>',
+                unsafe_allow_html=True,
+            )
+            _render_panel_body(api, panel, body_key)
+
+
 def _render_turn(api: ApiClient, index: int, message: dict) -> None:
     if message.get("role") == "user":
         st.markdown(_user_bubble(message), unsafe_allow_html=True)
@@ -1953,20 +2436,553 @@ def _render_turn(api: ApiClient, index: int, message: dict) -> None:
         panels = [
             panel for panel in message.get("artifacts") or [] if panel.get("kind") not in _LOG_KINDS
         ]
-        for number, panel in enumerate(panels):
+        muted = [panel for panel in panels if panel.get("kind") in _QUIET_KINDS]
+        rest = [panel for panel in panels if panel.get("kind") not in _QUIET_KINDS]
+        if muted:
+            _render_muted_row(api, index, muted)
+        for number, panel in enumerate(rest):
             _render_panel(api, panel, f"va-out-{index}-{number}", expanded=number == 0)
 
 
-def _empty_state(sample_path: Path) -> None:
-    st.markdown(
-        f'<div class="va-hero"><div class="va-mark">{_mark(30)}</div>'
-        "<h1>What should we look into?</h1>"
-        "<p>Ask about your recorded calls, or attach a recording to analyze it.</p></div>",
-        unsafe_allow_html=True,
+def _join(values: object) -> str:
+    if not isinstance(values, list):
+        return ""
+    return ", ".join(str(item) for item in values if item)
+
+
+def _short_time(value: object) -> str:
+    text = str(value or "")
+    return text[:16].replace("T", " ")
+
+
+def _browse_row(item: dict) -> dict:
+    taxonomy = item.get("taxonomy") or {}
+    layer2 = item.get("layer2") or {}
+    pace = layer2.get("speaking_pace") or {}
+    energy = layer2.get("rms_energy") or {}
+    sentiment = layer2.get("sentiment_lexicon") or {}
+    words = layer2.get("pos_counts") or {}
+    return {
+        "Recording": item.get("original_filename") or "recording",
+        "Created": _short_time(item.get("created_at")),
+        "Duration (sec)": item.get("duration_sec"),
+        "Status": item.get("status") or "",
+        "Summary": item.get("summary") or "",
+        "Professional": _join(taxonomy.get("professional_topics")),
+        "Personal": _join(taxonomy.get("personal_topics")),
+        "Upcoming": _join(taxonomy.get("upcoming_events")),
+        "Sentiment": sentiment.get("label") or "",
+        "Words per minute": pace.get("words_per_minute"),
+        "RMS": energy.get("rms_mean"),
+        "Nouns": words.get("noun_count"),
+        "Adjectives": words.get("adjective_count"),
+    }
+
+
+_BROWSE_GRID_JS = """
+<script>
+(function () {
+  var script = document.currentScript;
+  var root = script && script.closest(".va-grid");
+  if (!root) {
+    var grids = document.querySelectorAll(".va-grid");
+    root = grids.length ? grids[grids.length - 1] : null;
+  }
+  if (!root) {
+    return;
+  }
+  var inputs = root.querySelectorAll("thead input");
+  var buttons = root.querySelectorAll("thead button");
+  var body = root.querySelector("tbody");
+  var empty = root.querySelector("p.va-none");
+  var rows = Array.prototype.filter.call(
+    root.querySelectorAll("tbody tr"),
+    function (row) { return row.hasAttribute("data-i"); }
+  );
+  var cache = rows.map(function (row) {
+    return Array.prototype.map.call(row.children, function (cell) {
+      return (cell.textContent || "").toLowerCase();
+    });
+  });
+  var dir = {};
+
+  function applyFilter() {
+    var queries = Array.prototype.map.call(inputs, function (input) {
+      return input.value.trim().toLowerCase();
+    });
+    var shown = 0;
+    rows.forEach(function (row, index) {
+      var cells = cache[index];
+      var ok = true;
+      queries.forEach(function (query, col) {
+        if (query && cells[col].indexOf(query) === -1) {
+          ok = false;
+        }
+      });
+      row.hidden = !ok;
+      if (ok) {
+        shown += 1;
+      }
+    });
+    if (empty) {
+      empty.classList.toggle("va-show", shown === 0);
+    }
+  }
+
+  function valueOf(row, col) {
+    var cell = row.children[col];
+    if (!cell) {
+      return "";
+    }
+    if (cell.hasAttribute("data-n")) {
+      if (cell.getAttribute("data-n") === "") {
+        return null;
+      }
+      var num = Number(cell.getAttribute("data-n"));
+      return isNaN(num) ? null : num;
+    }
+    return (cell.textContent || "").toLowerCase();
+  }
+
+  function sortBy(col) {
+    var next = dir[col] === "asc" ? "desc" : "asc";
+    dir = {};
+    dir[col] = next;
+    var numeric = rows.some(function (row) {
+      var cell = row.children[col];
+      return cell && cell.hasAttribute("data-n");
+    });
+    var ranked = rows.slice().sort(function (a, b) {
+      var left = valueOf(a, col);
+      var right = valueOf(b, col);
+      var emptyL = left === null || left === "";
+      var emptyR = right === null || right === "";
+      if (emptyL || emptyR) {
+        if (emptyL && emptyR) {
+          return 0;
+        }
+        return emptyL ? 1 : -1;
+      }
+      var cmp = numeric ? left - right : String(left).localeCompare(String(right));
+      return next === "asc" ? cmp : -cmp;
+    });
+    ranked.forEach(function (row) {
+      body.appendChild(row);
+    });
+    Array.prototype.forEach.call(buttons, function (button, index) {
+      if (dir[index] === "asc") {
+        button.textContent = "↑";
+      } else if (dir[index] === "desc") {
+        button.textContent = "↓";
+      } else {
+        button.textContent = "↕";
+      }
+    });
+  }
+
+  Array.prototype.forEach.call(inputs, function (input) {
+    input.addEventListener("input", applyFilter);
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+      }
+    });
+  });
+  Array.prototype.forEach.call(buttons, function (button, index) {
+    button.addEventListener("click", function () {
+      sortBy(index);
+    });
+  });
+
+  var maxBtn = root.querySelector(".va-max");
+  var dock = null;
+  var usingFull = false;
+
+  function collapse() {
+    var wasFull = document.fullscreenElement === root;
+    usingFull = false;
+    root.classList.remove("va-maxed");
+    if (dock && dock.parentNode) {
+      dock.parentNode.insertBefore(root, dock);
+      dock.parentNode.removeChild(dock);
+      dock = null;
+    }
+    if (maxBtn) {
+      maxBtn.textContent = "Maximize";
+      maxBtn.setAttribute("aria-label", "Maximize table");
+    }
+    if (wasFull && document.exitFullscreen) {
+      document.exitFullscreen();
+    }
+  }
+
+  function expand() {
+    if (!dock) {
+      dock = document.createComment("va-grid-dock");
+      root.parentNode.insertBefore(dock, root);
+      document.body.appendChild(root);
+    }
+    root.classList.add("va-maxed");
+    if (maxBtn) {
+      maxBtn.textContent = "Restore";
+      maxBtn.setAttribute("aria-label", "Restore table");
+    }
+    var ask = root.requestFullscreen || root.webkitRequestFullscreen;
+    if (!ask) {
+      return;
+    }
+    Promise.resolve(ask.call(root)).then(function () {
+      usingFull = document.fullscreenElement === root;
+    }).catch(function () {});
+  }
+
+  if (maxBtn) {
+    maxBtn.addEventListener("click", function () {
+      if (root.classList.contains("va-maxed")) {
+        collapse();
+      } else {
+        expand();
+      }
+    });
+  }
+  document.addEventListener("fullscreenchange", function () {
+    if (usingFull && !document.fullscreenElement) {
+      collapse();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && root.classList.contains("va-maxed")) {
+      collapse();
+    }
+  });
+  // Download CSV / JSON: exactly the rows shown now (header filters and sort applied).
+  // Built in the browser because the filters live here and never reach Python.
+  var raw = [];
+  var cols = [];
+  try {
+    raw = JSON.parse(root.getAttribute("data-rows") || "[]");
+    cols = JSON.parse(root.getAttribute("data-cols") || "[]");
+  } catch (err) {
+    raw = [];
+  }
+  function pad(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+  function stamp() {
+    var d = new Date();
+    return "" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      "-" + pad(d.getHours()) + pad(d.getMinutes());
+  }
+  function csvCell(value) {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    var text = String(value);
+    // A leading = + - @ would run as a formula in a spreadsheet.
+    if (typeof value === "string" && /^[=+\\-@\\t\\r]/.test(text)) {
+      text = "'" + text;
+    }
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+  function shownRows() {
+    return Array.prototype.filter.call(body.querySelectorAll("tr[data-i]"), function (row) {
+      return !row.hidden;
+    }).map(function (row) {
+      return raw[Number(row.getAttribute("data-i"))];
+    }).filter(Boolean);
+  }
+  function download(fmt) {
+    var picked = shownRows();
+    var text;
+    var type;
+    if (fmt === "json") {
+      text = JSON.stringify(picked, null, 2);
+      type = "application/json";
+    } else {
+      var lines = [cols.map(csvCell).join(",")];
+      picked.forEach(function (row) {
+        lines.push(cols.map(function (col) { return csvCell(row[col]); }).join(","));
+      });
+      text = "\\ufeff" + lines.join("\\r\\n") + "\\r\\n";
+      type = "text/csv;charset=utf-8";
+    }
+    var url = URL.createObjectURL(new Blob([text], { type: type }));
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "voice-results-" + stamp() + "." + fmt;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+      link.remove();
+    }, 1000);
+  }
+  Array.prototype.forEach.call(root.querySelectorAll(".va-export"), function (button) {
+    button.addEventListener("click", function () {
+      download(button.getAttribute("data-fmt"));
+    });
+  });
+})();
+</script>
+"""
+
+
+def _browse_cell(name: str, value: object) -> str:
+    if value is None or value == "":
+        return ""
+    if name not in _BROWSE_NUMERIC:
+        return str(value)
+    spec = {
+        "Duration (sec)": ".1f",
+        "Words per minute": ".0f",
+        "RMS": ".4f",
+        "Nouns": ".0f",
+        "Adjectives": ".0f",
+    }[name]
+    try:
+        return format(float(value), spec)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _browse_grid(rows: list[dict]) -> str:
+    """One table. Each header is the filter for that column. The script is static."""
+    heads = []
+    for name in _BROWSE_COLUMNS:
+        label = html.escape(name)
+        heads.append(
+            '<th><div class="va-colhead">'
+            f'<input aria-label="Filter {label}" placeholder="{label}" '
+            'autocomplete="off" spellcheck="false">'
+            f'<button type="button" aria-label="Sort {label}">↕</button>'
+            "</div></th>"
+        )
+    body = []
+    for index, row in enumerate(rows):
+        cells = []
+        for name in _BROWSE_COLUMNS:
+            text = _browse_cell(name, row.get(name))
+            shown = html.escape(text)
+            attrs: list[str] = []
+            if name == "Summary":
+                attrs.append('class="va-summary"')
+            if name in _BROWSE_NUMERIC:
+                attrs.append(f'data-n="{shown}"')
+            if text:
+                attrs.append(f'title="{shown}"')
+            attr = (" " + " ".join(attrs)) if attrs else ""
+            cells.append(f"<td{attr}>{shown}</td>")
+        body.append(f'<tr data-i="{index}">{"".join(cells)}</tr>')
+    # Raw values (not the rounded cell text) for Download CSV / JSON.
+    data_rows = html.escape(json.dumps(rows, default=str), quote=True)
+    data_cols = html.escape(json.dumps(list(_BROWSE_COLUMNS)), quote=True)
+    return (
+        f'<div class="va-grid" data-rows="{data_rows}" data-cols="{data_cols}">'
+        '<div class="va-grid-bar">'
+        '<button type="button" class="va-export" data-fmt="csv" '
+        'aria-label="Download the shown rows as CSV">Download CSV</button>'
+        '<button type="button" class="va-export" data-fmt="json" '
+        'aria-label="Download the shown rows as JSON">JSON</button>'
+        '<button type="button" class="va-max" aria-label="Maximize table">Maximize</button>'
+        "</div>"
+        '<div class="va-grid-scroll"><table><thead><tr>'
+        + "".join(heads)
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+        + '<p class="va-none">No recordings matched</p>'
+        + "</div>"
+        + _BROWSE_GRID_JS
+        + "</div>"
     )
-    with st.container(key="va-hero-composer"):
-        _composer("va-composer-hero")
-    with st.container(key="va-chips", horizontal=True, horizontal_alignment="center", gap="small"):
+
+
+def _browse_panel(api: ApiClient) -> None:
+    """Stored rows for this user. Headers filter and sort this page. No model call."""
+    try:
+        listing = api.list_files({"limit": 200})
+    except ApiError as exc:
+        st.error(exc.detail)
+        return
+    items = listing.get("items") or []
+    total = int(listing.get("total") or len(items))
+    if total > len(items):
+        st.caption(f"Latest {len(items)} of {total}. Type in a column header to filter these rows.")
+    else:
+        st.caption("Type in a column header to filter these rows.")
+    if not items:
+        _empty("No recordings yet", "")
+        return
+    st.html(
+        _browse_grid([_browse_row(item) for item in items]),
+        unsafe_allow_javascript=True,
+    )
+
+
+def _template_group(choice: str, slot: str) -> str:
+    if choice == "trend":
+        return slot
+    return _TEMPLATE_GROUP[choice]
+
+
+def _template_panel(api: ApiClient) -> None:
+    """One fixed question. The only choice is the period slot on the trend template."""
+    labels = dict(_TEMPLATES)
+    choice = st.selectbox(
+        "Template",
+        [item[0] for item in _TEMPLATES],
+        format_func=lambda item: labels[item],
+        key="va-template-choice",
+    )
+    slot = "month"
+    if choice == "trend":
+        slot = st.selectbox(
+            "Period",
+            ["day", "week", "month"],
+            index=2,
+            format_func=str.capitalize,
+            key="va-template-slot",
+        )
+        st.caption(f"Show the trend per {slot}.")
+    if st.button("Run", key="va-template-run", type="primary"):
+        group = _template_group(choice, slot)
+        pretty = _GROUP_LABEL.get(group, group).lower()
+        try:
+            created = _await_progress(
+                f"Writing the summary · {pretty}",
+                lambda: api.run_summary({"group_by": group}),
+            )
+        except ApiError as exc:
+            st.error(exc.detail)
+        else:
+            st.session_state["assistant_template_result"] = created.get("result") or {}
+    result = st.session_state.get("assistant_template_result")
+    if isinstance(result, dict) and result.get("group_by"):
+        data = dict(result)
+        if result.get("file_count"):
+            data["members"] = _group_members(api, result)
+        _render_rollup(data, "suggest")
+
+
+def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
+    rows = _safe_files(api) if files is None else files
+    completed = [item for item in rows if item.get("status") == "completed"]
+    if not completed:
+        return
+    with st.container(key="va-card-suggest"):
+        st.markdown(
+            '<div class="va-card-title">With your saved recordings</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{len(completed)} completed. Pick a next step.")
+        with st.container(key="va-suggest-actions", horizontal=True, gap="small"):
+            if st.button("Browse results", key="va-open-browse", type="tertiary"):
+                current = st.session_state.get("assistant_suggest")
+                st.session_state["assistant_suggest"] = None if current == "browse" else "browse"
+                st.rerun()
+            if st.button("Ask from a template", key="va-open-template", type="tertiary"):
+                current = st.session_state.get("assistant_suggest")
+                st.session_state["assistant_suggest"] = (
+                    None if current == "template" else "template"
+                )
+                st.rerun()
+        mode = st.session_state.get("assistant_suggest")
+        if mode == "browse":
+            _browse_panel(api)
+        elif mode == "template":
+            _template_panel(api)
+
+
+def _greeting(returning: bool) -> str:
+    pool = _WELCOME_BACK if returning else _GREETINGS
+    kind = "back" if returning else "new"
+    choice = st.session_state.get("assistant_greeting")
+    if st.session_state.get("assistant_greeting_kind") != kind or choice not in pool:
+        choice = random.choice(pool)
+        st.session_state["assistant_greeting"] = choice
+        st.session_state["assistant_greeting_kind"] = kind
+        st.session_state.pop("assistant_typed_done", None)
+        st.session_state["assistant_typed_count"] = 0
+        st.session_state["assistant_typed_pause"] = 0
+        st.session_state["assistant_typed_target"] = choice
+    return choice
+
+
+def _type_step(text: str, count: int) -> int:
+    end = min(len(text), count + 1)
+    # Keep a variation selector or joiner with the emoji in front of it.
+    while end < len(text) and text[end] in ("\ufe0f", "\u200d"):
+        end += 1
+        if text[end - 1] == "\u200d" and end < len(text):
+            end += 1
+    return end
+
+
+@st.fragment(run_every=0.065)
+def _type_greeting(text: str) -> None:
+    # One letter at a time, with a short hold after a pause in the sentence.
+    # A finished line is drawn by the caller, so this timer ends on the rerun below.
+    if not _signed_in():
+        return
+    if st.session_state.get("assistant_typed_target") != text:
+        st.session_state["assistant_typed_target"] = text
+        st.session_state["assistant_typed_count"] = 0
+        st.session_state["assistant_typed_pause"] = 0
+    count = int(st.session_state.get("assistant_typed_count") or 0)
+    pause = int(st.session_state.get("assistant_typed_pause") or 0)
+    if pause:
+        st.session_state["assistant_typed_pause"] = pause - 1
+    else:
+        count = _type_step(text, count)
+        st.session_state["assistant_typed_count"] = count
+        if count and text[count - 1] in ".!?":
+            st.session_state["assistant_typed_pause"] = 4
+        elif count and text[count - 1] == ",":
+            st.session_state["assistant_typed_pause"] = 2
+    finished = count >= len(text)
+    st.markdown(_greet_bubble(text[:count], caret=not finished), unsafe_allow_html=True)
+    if finished:
+        st.session_state["assistant_typed_done"] = text
+        st.rerun()
+
+
+@st.fragment(run_every=0.065)
+def _type_followup(text: str) -> None:
+    """Type the follow-up one letter at a time, the same way the greeting types."""
+    if not _signed_in():
+        return
+    if st.session_state.get("assistant_follow_target") != text:
+        st.session_state["assistant_follow_target"] = text
+        st.session_state["assistant_follow_count"] = 0
+        st.session_state["assistant_follow_pause"] = 0
+    count = int(st.session_state.get("assistant_follow_count") or 0)
+    pause = int(st.session_state.get("assistant_follow_pause") or 0)
+    if pause:
+        st.session_state["assistant_follow_pause"] = pause - 1
+    else:
+        count = _type_step(text, count)
+        st.session_state["assistant_follow_count"] = count
+        if count and text[count - 1] in ".!?":
+            st.session_state["assistant_follow_pause"] = 4
+        elif count and text[count - 1] == ",":
+            st.session_state["assistant_follow_pause"] = 2
+    finished = count >= len(text)
+    st.markdown(_greet_bubble(text[:count], caret=not finished), unsafe_allow_html=True)
+    if finished:
+        st.session_state["assistant_followup"] = ""
+        _say("assistant", text)
+        st.rerun()
+
+
+def _empty_state(api: ApiClient, sample_path: Path) -> None:
+    files = _safe_files(api)
+    text = _greeting(bool(files))
+    if st.session_state.get("assistant_typed_done") == text:
+        st.markdown(_greet_bubble(text, caret=False), unsafe_allow_html=True)
+    else:
+        _type_greeting(text)
+    _suggestion_box(api, files)
+    with st.container(key="va-replies"):
         for label, icon, prompt in _SUGGESTIONS:
             if st.button(label, key=f"va-suggest-{label}", icon=icon):
                 if prompt is None:
@@ -2000,46 +3016,38 @@ def _uploader_card(sample_path: Path) -> None:
                 st.rerun()
 
 
-def _options_card(api: ApiClient) -> None:
-    try:
-        options = api.prompt_options()
-        saved = {
-            row["option_id"]: row.get("params") or {} for row in api.get_config()["selections"]
-        }
-    except ApiError as exc:
-        st.error(exc.detail)
-        return
-    with st.container(key="va-card-options"):
-        st.markdown('<div class="va-card-title">Layer 2 options</div>', unsafe_allow_html=True)
-        with st.form("va-options", border=False):
-            selections = []
-            for option in options:
-                enabled = st.checkbox(
-                    option["label"], value=option["id"] in saved, help=option["description"]
-                )
-                params = {name: spec["default"] for name, spec in option["params"].items()}
-                params.update(saved.get(option["id"]) or {})
-                if enabled:
-                    selections.append({"option_id": option["id"], "params": params})
-            with st.container(horizontal=True, gap="small"):
-                submitted = st.form_submit_button("Start processing", type="primary")
-                cancelled = st.form_submit_button("Cancel", type="tertiary")
-    if cancelled:
-        st.session_state["assistant_pending"] = []
+def _default_selections(options: list[dict]) -> list[dict]:
+    selections = []
+    for option in options:
+        params = {name: spec["default"] for name, spec in (option.get("params") or {}).items()}
+        selections.append({"option_id": option["id"], "params": params})
+    return selections
+
+
+def _start_pending(api: ApiClient) -> None:
+    """Upload the attached files and run every Analytics measure."""
+    pending = list(st.session_state.get("assistant_pending") or [])
+    if not pending:
         st.session_state["assistant_phase"] = "ready"
-        _say("assistant", "Okay, I won't upload those.")
-        st.rerun()
-    if not submitted:
         return
-    try:
+
+    def _upload():
+        selections = _default_selections(api.prompt_options())
         api.save_config(selections)
-        created = api.upload(st.session_state.get("assistant_pending") or [])
+        return api.upload(pending)
+
+    try:
+        created = _await_progress("Uploading", _upload)
     except ApiError as exc:
-        st.error(exc.detail)
-        return
+        st.session_state["assistant_pending"] = []
+        st.session_state["assistant_after_upload"] = ""
+        st.session_state["assistant_phase"] = "ready"
+        _say("assistant", exc.detail)
+        st.rerun()
     st.session_state["assistant_pending"] = []
     items = created.get("items") or []
     st.session_state["assistant_watch"] = [item["id"] for item in items]
+    st.session_state["assistant_after_ids"] = [item["id"] for item in items]
     st.session_state["assistant_reported"] = []
     names = ", ".join(item["original_filename"] for item in items)
     _say(
@@ -2120,6 +3128,7 @@ def _processing_card(items: list[dict], events: list[dict]) -> None:
     """Activity column: the stage sequence, current step, and the latest log lines."""
     watched = _watched_items(items)
     with st.container(key="va-log-processing"):
+        st.progress(_watch_percent(watched))
         with st.status(_processing_label(watched), state="running", expanded=True):
             st.markdown("".join(_flow_html(item) for item in watched), unsafe_allow_html=True)
             names = {str(item.get("original_filename")) for item in watched}
@@ -2171,6 +3180,7 @@ def _processing_status(items: list[dict], events: list[dict]) -> None:
     shell = "va-proc-status" if state == "running" else "va-proc-status-still"
     opened = bool(st.session_state.get("va_proc_open", False))
     with st.container(key=shell):
+        st.progress(_watch_percent(watched))
         st.expander(
             _processing_label(watched),
             expanded=False,
@@ -2184,11 +3194,63 @@ def _processing_status(items: list[dict], events: list[dict]) -> None:
                 _processing_detail(st, watched, events)
 
 
-def _typing(label: str = "Thinking") -> str:
-    return (
-        f'<div class="va-row assistant"><div class="va-av">{_mark(15)}</div>'
-        f'<div class="va-typing"><b>{html.escape(label)}</b><i></i><i></i><i></i></div></div>'
-    )
+def _item_percent(item: dict) -> int:
+    """How far one recording is through the stage list, as a percent."""
+    status = item.get("status") or ""
+    stage = item.get("stage") or "upload"
+    if status in {"completed", "blocked"} or stage == "saved":
+        return 100
+    index = _STEP_INDEX.get(stage, 0)
+    span = max(len(_STEPS) - 1, 1)
+    if status == "failed":
+        return int(index / span * 100)
+    return min(95, int((index + 0.45) / span * 100))
+
+
+def _watch_percent(watched: list[dict]) -> int:
+    if not watched:
+        return 8
+    total = sum(_item_percent(item) for item in watched)
+    return int(total / len(watched))
+
+
+def _processing_meter(items: list[dict]) -> tuple[int, str]:
+    """Percent and label for recordings that are still being analyzed."""
+    running = [item for item in items if item.get("status") in {"uploaded", "processing"}]
+    if not running:
+        return 100, "Saved"
+    percent = _watch_percent(running)
+    if len(running) == 1:
+        return percent, _processing_label(running)
+    return percent, f"Processing · {len(running)} still running"
+
+
+def _await_progress(label: str, work):
+    """Advance a bar on this thread while work() runs. The bar reaches 100 at the end."""
+    bar = st.progress(0, text=label)
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = work()
+        except Exception as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    tick = 0
+    while worker.is_alive():
+        tick += 1
+        shown = min(90, int(100 * (1 - 0.90**tick)))
+        bar.progress(max(shown, 6), text=label)
+        worker.join(0.12)
+    if "error" in box:
+        bar.empty()
+        raise box["error"]
+    bar.progress(100, text=label)
+    value = box.get("value")
+    bar.empty()
+    return value
 
 
 def _log_html(events: list[dict]) -> str:
@@ -2306,6 +3368,15 @@ def _render_log_group(group: dict) -> None:
             )
 
 
+def _live_log(api: ApiClient) -> None:
+    _items, events = _load(api, False, True)
+    st.markdown(
+        '<div class="va-lg-title"><span class="pip"></span>'
+        f"Live log · {len(events)}</div>" + _log_html(events),
+        unsafe_allow_html=True,
+    )
+
+
 def _activity_body(api: ApiClient, messages: list[dict], phase: str, pending: bool) -> None:
     st.markdown(
         '<div class="va-lg-title"><span class="pip"></span>Activity</div>',
@@ -2314,8 +3385,8 @@ def _activity_body(api: ApiClient, messages: list[dict], phase: str, pending: bo
     if not messages and not pending:
         st.markdown(
             '<div class="va-lg-empty"><div class="ico">&#9776;</div>'
-            "<b>Activity will appear here</b>Agent steps, tool calls, pipeline progress, "
-            "and the live log show up once you start a chat.</div>",
+            "<b>Activity will appear here</b>Agent steps, tool calls, and pipeline progress "
+            "show up once you start a chat.</div>",
             unsafe_allow_html=True,
         )
         return
@@ -2327,29 +3398,32 @@ def _activity_body(api: ApiClient, messages: list[dict], phase: str, pending: bo
     if phase == "processing":
         _processing_watch(api)
     groups = _log_groups(messages)
-    # Latest turn first.
+    # Latest turn first, oldest at the bottom.
     for group in reversed(groups):
         _render_log_group(group)
     if not groups and not pending and phase != "processing":
         st.caption("No tool calls yet in this chat.")
-    if st.session_state.get("show_live_log"):
-        _items, events = _load(api, False, True)
-        st.markdown(
-            '<div class="va-lg-title" style="margin-top:6px"><span class="pip"></span>'
-            f"Live log · {len(events)}</div>" + _log_html(events),
-            unsafe_allow_html=True,
-        )
 
 
 def _activity_column(api: ApiClient, messages: list[dict], phase: str, pending: bool) -> None:
+    """Live log on top, then the activity list. Drawn only while Show activity log is on."""
+    live = bool(st.session_state.get("show_live_log"))
     if _is_mobile():
         # Phones: the columns stack, so the logs sit below the chat, collapsed.
         with st.expander("Activity & logs", key="va-logs-mobile", icon=":material/receipt_long:"):
+            if live:
+                _live_log(api)
             _activity_body(api, messages, phase, pending)
         return
-    # A fixed-height container scrolls on its own, independent of the chat column.
-    with st.container(key="va-logs", height=_PANEL_HEIGHT):
-        _activity_body(api, messages, phase, pending)
+    # va-side is sticky (CSS), so it stays put when the page or the chat scrolls.
+    # Each box scrolls on its own.
+    side = "va-side-live" if live else "va-side"
+    with st.container(key=side, gap="small"):
+        if live:
+            with st.container(key="va-livelog"):
+                _live_log(api)
+        with st.container(key="va-logs", height=_PANEL_HEIGHT):
+            _activity_body(api, messages, phase, pending)
 
 
 def _html_table(rows: list[dict], bar: str | None = None) -> str:
@@ -2444,7 +3518,7 @@ def _export_document(messages: list[dict]) -> str:
             )
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
-        "<title>Voice Analytics conversation</title><style>"
+        "<title>Audio Analytics conversation</title><style>"
         "body{font-family:system-ui,sans-serif;background:#f5f7fc;color:#1f2330;"
         "margin:0;} .wrap{max-width:760px;margin:0 auto;padding:24px 16px 60px;}"
         "h1{font-size:1.2rem;} .va-av svg{display:block}"
@@ -2476,7 +3550,7 @@ def _export_document(messages: list[dict]) -> str:
         ".transcript{max-height:260px;overflow:auto;background:#f7f8fc;border-radius:10px;"
         "padding:8px 10px}"
         + _BUBBLE_CSS
-        + '</style></head><body><div class="wrap"><h1>Voice Analytics conversation</h1>'
+        + '</style></head><body><div class="wrap"><h1>Audio Analytics conversation</h1>'
         + "".join(parts)
         + "</div></body></html>"
     )
@@ -2532,11 +3606,24 @@ def _advance(api: ApiClient, items: list[dict]) -> bool:
         reported.add(file_id)
         added = True
     st.session_state["assistant_reported"] = list(reported)
-    if not pending and watch and not added:
-        _say("assistant", _FOLLOWUP)
-        st.session_state["assistant_phase"] = "ready"
+    if pending or not watch or st.session_state.get("assistant_batch_closed"):
+        return added
+    st.session_state["assistant_batch_closed"] = True
+    st.session_state["assistant_phase"] = "ready"
+    outcome = _after_batch(
+        str(st.session_state.get("assistant_after_upload") or ""),
+        list(st.session_state.get("assistant_after_ids") or []),
+    )
+    st.session_state["assistant_after_upload"] = ""
+    st.session_state["assistant_after_ids"] = []
+    if outcome["run"]:
+        _schedule(outcome["run"], outcome["files"], quiet=True)
         return True
-    return added
+    st.session_state["assistant_followup"] = outcome["followup"]
+    st.session_state["assistant_follow_count"] = 0
+    st.session_state["assistant_follow_pause"] = 0
+    st.session_state["assistant_follow_target"] = outcome["followup"]
+    return True
 
 
 @st.fragment(run_every=1.0)
@@ -2545,7 +3632,7 @@ def _processing_watch(api: ApiClient, compact: bool = False) -> None:
     # composer stays usable; a full rerun happens only when a file finishes.
     # compact is the activity-off chat: one status line, replaced each second,
     # and dropped entirely once the phase leaves "processing".
-    if st.session_state.get("assistant_phase") != "processing":
+    if not _signed_in() or st.session_state.get("assistant_phase") != "processing":
         return
     items, events = _load(api, True, True)
     if compact:
@@ -2562,27 +3649,49 @@ def _processing_watch(api: ApiClient, compact: bool = False) -> None:
         st.rerun()
 
 
+def _question_for_api(prompt: str) -> str:
+    files = [str(item) for item in (st.session_state.pop("assistant_run_files", None) or [])]
+    if len(files) == 1:
+        return f"{prompt}\nfile_id={files[0]}"
+    return prompt
+
+
 def _run_turn(api: ApiClient, prompt: str, placeholder) -> None:
-    placeholder.markdown(_typing(), unsafe_allow_html=True)
+    quiet = bool(st.session_state.pop("assistant_run_quiet", None))
+    history = _history_for_api(prompt)
+    message = _question_for_api(prompt)
+    session_id = st.session_state.get("assistant_session_id") or None
     try:
-        body = api.chat(prompt, _history_for_api())
+        with placeholder.container():
+            with st.container(key="va-thinking"):
+                body = _await_progress(
+                    "Thinking",
+                    lambda: api.chat(message, history, session_id),
+                )
     except ApiError as exc:
         _say("assistant", exc.detail)
         return
+    if body.get("session_id"):
+        st.session_state["assistant_session_id"] = str(body["session_id"])
+        st.session_state["assistant_session_ready"] = True
     calls = body.get("tool_calls") or []
     steps = _step_records(calls)
     labels = list(dict.fromkeys(_TOOL_LABEL.get(step["name"], step["name"]) for step in steps))
+    artifacts = _panels_for_tools(api, calls, prompt)
+    if quiet:
+        artifacts = [panel for panel in artifacts if panel.get("kind") not in _QUIET_KINDS]
     _say(
         "assistant",
         body.get("reply") or "No answer.",
         tools=labels,
-        artifacts=_panels_for_tools(api, calls, prompt),
+        artifacts=artifacts,
         steps=steps,
     )
 
 
 def render_assistant(api: ApiClient, sample_path: Path, meta: dict | None = None) -> None:
     _ensure_state()
+    _resume_session(api)
     st.markdown(_APP_CSS, unsafe_allow_html=True)
     messages = st.session_state["assistant_messages"]
     _header(meta, messages)
@@ -2601,24 +3710,55 @@ def render_assistant(api: ApiClient, sample_path: Path, meta: dict | None = None
         # st.container() is a plain block, so "with chat_col:" below works either way.
         chat_col = st.container()
     with chat_col:
-        if not messages and not prompt:
-            _empty_state(sample_path)
-            return
-        with st.container(key="va-thread", height=_PANEL_HEIGHT, autoscroll=True):
-            for index, message in enumerate(messages):
-                _render_turn(api, index, message)
-            if phase == "processing" and not show_activity:
-                # In the thread, under the "processing has started" message.
-                # The full stage sequence stays in the activity column.
-                _processing_watch(api, compact=True)
-            if phase == "options":
-                _options_card(api)
-            if st.session_state.get("assistant_show_uploader"):
-                _uploader_card(sample_path)
-            placeholder = st.empty()
-        _composer("va-composer")
+        first_screen = not messages and not prompt
+        if first_screen:
+            with st.container(key="va-open"):
+                _empty_state(api, sample_path)
+        else:
+            with st.container(key="va-thread", height=_PANEL_HEIGHT, autoscroll=True):
+                opening = _opening_line()
+                first = messages[0] if messages else None
+                opening_saved = bool(
+                    opening
+                    and first
+                    and first.get("role") == "assistant"
+                    and (first.get("content") or "").strip() == opening
+                    and not first.get("artifacts")
+                )
+                if opening:
+                    st.markdown(_greet_bubble(opening, caret=False), unsafe_allow_html=True)
+                start = 1 if opening_saved else 0
+                for index, message in enumerate(messages):
+                    if index < start:
+                        continue
+                    _render_turn(api, index, message)
+                if phase == "processing" and not show_activity:
+                    # In the thread, under the "processing has started" message.
+                    # The full stage sequence stays in the activity column.
+                    _processing_watch(api, compact=True)
+                if phase in {"uploading", "options"}:
+                    _start_pending(api)
+                if st.session_state.get("assistant_show_uploader"):
+                    _uploader_card(sample_path)
+                follow = str(st.session_state.get("assistant_followup") or "").strip()
+                if follow:
+                    _type_followup(follow)
+                placeholder = st.empty()
+                typing = bool(follow)
+                # Inside the thread, so it scrolls with the chat and the page never grows.
+                if (
+                    phase == "ready"
+                    and messages
+                    and not typing
+                    and not prompt
+                    and not st.session_state.get("assistant_show_uploader")
+                ):
+                    _suggestion_box(api)
+    # Top level, outside the columns, so Streamlit pins it to the bottom of the page.
+    _composer("va-composer")
 
-    if prompt:
+    if prompt and not first_screen:
         st.session_state["assistant_run"] = None
         _run_turn(api, prompt, placeholder)
+        _take_next_run()
         st.rerun()

@@ -108,9 +108,14 @@ class ApiClient:
     def list_summaries(self) -> dict:
         return self._request("GET", "/api/v1/summaries").json()
 
-    def chat(self, message: str, history: list[dict]) -> dict:
-        return self._request(
-            "POST",
-            "/api/v1/chat",
-            json={"message": message, "history": history},
-        ).json()
+    def chat(self, message: str, history: list[dict], session_id: str | None = None) -> dict:
+        payload: dict = {"message": message, "history": history}
+        if session_id:
+            payload["session_id"] = session_id
+        return self._request("POST", "/api/v1/chat", json=payload).json()
+
+    def chat_session(self) -> dict:
+        return self._request("GET", "/api/v1/chat/session").json()
+
+    def open_chat_session(self) -> dict:
+        return self._request("POST", "/api/v1/chat/session").json()
