@@ -1,9 +1,19 @@
-"""Whitelist of Analytics measures. Callers never supply a system prompt."""
+"""Whitelist of Analytics options. Callers never supply a system prompt.
+
+Every option is a predefined prompt: its instruction text is fixed on the server in
+app/analysis/prompts.py, keyed by the option id. Callers only pick ids and typed params.
+Options with a "tool" get their numbers from server code (measure_rms, speaking pace);
+the model calls the tool and adds a short interpretation.
+"""
+
+_MAX_ITEMS = {"type": "int", "min": 1, "max": 10, "default": 5}
 
 CATALOG: dict[str, dict] = {
     "rms_energy": {
-        "label": "RMS energy",
-        "description": "Windowed RMS energy of the decoded audio (WAV, MP3, M4A, OGG, FLAC).",
+        "label": "Loudness (RMS)",
+        "kind": "llm",
+        "tool": "measure_rms",
+        "description": "AI calls a loudness tool on the decoded audio, then describes the trend.",
         "params": {
             "window_ms": {
                 "type": "enum",
@@ -14,7 +24,8 @@ CATALOG: dict[str, dict] = {
     },
     "pos_counts": {
         "label": "Nouns and adjectives",
-        "description": "spaCy part-of-speech counts and the most common lemmas.",
+        "kind": "llm",
+        "description": "AI counts nouns and adjectives and lists the most common ones.",
         "params": {
             "top_n": {
                 "type": "int",
@@ -26,15 +37,45 @@ CATALOG: dict[str, dict] = {
     },
     "speaking_pace": {
         "label": "Speaking pace",
-        "description": "Words per minute from the transcript and the measured duration.",
+        "kind": "llm",
+        "tool": "measure_speaking_pace",
+        "description": "AI calls a pace tool (words per minute), then describes the pace.",
         "params": {},
     },
+    # Id kept from the earlier lexicon measure so saved choices and filters still work.
     "sentiment_lexicon": {
-        "label": "Lexicon sentiment",
-        "description": "Positive and negative word counts from a fixed lexicon.",
+        "label": "Sentiment",
+        "kind": "llm",
+        "description": "Positive, neutral, or negative, with a score and a one-sentence reason.",
         "params": {},
+    },
+    "action_items": {
+        "label": "Action items",
+        "kind": "llm",
+        "description": "Tasks and follow-ups mentioned in the recording, as short phrases.",
+        "params": {"max_items": dict(_MAX_ITEMS)},
+    },
+    "tone": {
+        "label": "Tone",
+        "kind": "llm",
+        "description": "Formal, casual, tense, friendly, or neutral, with a one-sentence reason.",
+        "params": {},
+    },
+    "key_entities": {
+        "label": "Key entities",
+        "kind": "llm",
+        "description": "People, organizations, and places named in the recording.",
+        "params": {"max_items": dict(_MAX_ITEMS)},
     },
 }
+
+TONE_LABELS = ("formal", "casual", "tense", "friendly", "neutral")
+SENTIMENT_LABELS = ("positive", "neutral", "negative")
+
+
+def option_kind(option_id: str) -> str:
+    return str(CATALOG.get(option_id, {}).get("kind") or "llm")
+
 
 CUSTOM_FILTERS: dict[str, dict] = {
     "sentiment": {
@@ -108,6 +149,8 @@ def public_catalog() -> list[dict]:
             {
                 "id": option_id,
                 "label": spec["label"],
+                "kind": spec.get("kind", "llm"),
+                "tool": spec.get("tool"),
                 "description": spec["description"],
                 "params": spec["params"],
             }

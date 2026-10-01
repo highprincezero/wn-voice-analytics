@@ -19,7 +19,7 @@ flowchart LR
 | Upload | 10 files, 20 MB. wav, mp3, m4a, ogg, flac |
 | Filter | Date, duration, topic, Analytics |
 | Insights | Length, summary, professional topics, personal topics, upcoming events |
-| Analytics | Loudness, word counts, pace, sentiment |
+| Analytics | Predefined AI prompts: loudness and pace (via measuring tools), nouns and adjectives, sentiment, action items, tone, key entities |
 | Summaries | All recordings, topic, day, week, month, sentiment |
 | Export | Browse results: Download CSV or JSON of the rows shown, filters applied |
 | Opening line | Fixed list. No model call |
@@ -53,7 +53,7 @@ The pictures are inside [Architecture](docs/architecture.md) and [Scaling](docs/
 | --- | --- |
 | Words | `gpt-4o-transcribe` |
 | Summary, topics, chat | `gpt-5-mini` |
-| Analytics | None |
+| Analytics | `gpt-5-mini`, one call per file with the ticked predefined prompts. Loudness and pace numbers come from server tools |
 | Blocked transcript | Stored. Later steps do not run |
 
 Blob keys, container `voice`:
@@ -84,7 +84,7 @@ Open http://localhost:8501. The logged-out caption says mock mode is on. Create 
 
 Upload the bundled sample from the assistant. Processing starts on its own. Analytics sits in a small box under the result.
 
-Pick which Analytics measures run, and their settings (loudness window, top words shown), in Analytics settings next to Summarize across files, or with `PUT /api/v1/prompts/config`. All four run by default. Changes apply to new uploads.
+Pick which Analytics options run, and their settings (loudness window, top words shown, most items listed), in Analytics settings next to Summarize across files, or with `PUT /api/v1/prompts/config`. All seven run by default. Changes apply to new uploads.
 
 Show activity log starts off. Turn it on to see the live log, then the activity list below it, newest turn first. Off hides both. The choice stays through processing and reruns, and `?activity=1` or `?activity=0` in the address keeps it after a new log-in. The side panel stays put while the chat scrolls. The chat input stays pinned to the bottom. The opening screen offers two replies: Summarize my calls and Upload a recording.
 
@@ -215,9 +215,14 @@ Base path `/api/v1`. Authenticated routes send `Authorization: Bearer <token>`. 
 
 [docs/guardrails.md](docs/guardrails.md).
 
-**Layer 2 design choice.** RMS loudness, noun and adjective counts, speaking pace, and sentiment are deterministic, so they are computed in code (RMS math, spaCy, a fixed word list), not by an LLM. That is more accurate, free, and repeatable, and the user's choices never reach any LLM, so they cannot carry a prompt injection. Choices are checked against a fixed whitelist with typed parameters. Users select and configure them in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI").
+**Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
 
 **Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any LLM call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+
+### Guardrails for Layer 2
+
+- Filter parameters: the UI offers only fixed choices. The server does not trust the API and re-checks every request against the whitelist: unknown ids, out-of-range or wrongly typed params (for example `window_ms` 123), and extra fields are rejected with an error. Only fixed server-side prompt text reaches the LLM; user values are validated numbers.
+- Audio content: the content-safety check screens every transcript before any LLM. Blocked transcripts never reach the LLM or chat. Hardened prompts treat the transcript as untrusted data inside escaped markers. Output is schema-validated, and loudness and pace numbers come from server tools only.
 
 ## Worth knowing
 

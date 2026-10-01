@@ -4,9 +4,11 @@ import logging
 
 import httpx
 
+from app.analysis.llm_options import build_llm_schema
 from app.analysis.prompts import (
     build_chunk_messages,
     build_layer1_messages,
+    build_llm_options_messages,
     build_reduce_messages,
     build_rollup_messages,
 )
@@ -157,6 +159,72 @@ class AzureIntelligence:
     def rollup_summary(self, summaries: list[str]) -> str:
         parsed = self._chat(build_rollup_messages(summaries), _ROLLUP_SCHEMA, "AudioRollup")
         return str(parsed["summary"])
+
+    def _post_chat(self, body: dict) -> dict:
+        settings = get_settings()
+        url = (
+            f"{settings.azure_openai_endpoint.rstrip('/')}/openai/deployments/"
+            f"{settings.azure_openai_chat_deployment}/chat/completions"
+            f"?api-version={settings.azure_openai_api_version}"
+        )
+        headers = {"api-key": settings.azure_openai_api_key, "Content-Type": "application/json"}
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            try:
+                with httpx.Client(timeout=60) as client:
+                    response = client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]
+            except Exception as exc:
+                last_error = exc
+                logger.warning("azure chat call failed: %s", type(exc).__name__)
+        assert last_error is not None
+        raise last_error
+
+    # Analytics predefined prompts: one structured call built from only the ticked options.
+    # Loudness and pace blocks ask the model to call server tools; the loop runs them and
+    # sends the exact results back as tool messages, then reads the final JSON.
+    def predefined_prompts(self, transcript: str, options: list[dict], tools) -> dict:
+        self._require()
+        settings = get_settings()
+        messages: list[dict] = build_llm_options_messages(transcript, options)
+        specs = tools.specs()
+        schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "AudioLayer2Prompts",
+                "strict": True,
+                "schema": build_llm_schema(options),
+            },
+        }
+        for round_index in range(3):
+            body: dict = {"messages": messages, "response_format": schema, **chat_sampling_fields()}
+            if specs:
+                body["tools"] = specs
+                # First round must measure; later rounds may only answer.
+                body["tool_choice"] = "required" if round_index == 0 else "none"
+            message = self._post_chat(body)
+            calls = message.get("tool_calls") or []
+            if not calls:
+                parsed = json.loads(message.get("content") or "{}")
+                record_generation(
+                    "AudioLayer2Prompts", settings.azure_openai_chat_deployment, messages, parsed
+                )
+                return parsed
+            messages.append(
+                {"role": "assistant", "content": message.get("content"), "tool_calls": calls}
+            )
+            for call in calls:
+                function = call.get("function") or {}
+                result = tools.run(str(function.get("name") or ""), function.get("arguments"))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": tools.as_message(result),
+                    }
+                )
+        raise RuntimeError("predefined prompts did not finish")
 
     def speaker_profile(self, audio: bytes, filename: str) -> dict:
         self._require()

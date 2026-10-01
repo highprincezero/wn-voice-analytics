@@ -24,6 +24,9 @@ class Layer2Payload(BaseModel):
     pos_counts: dict | None = None
     speaking_pace: dict | None = None
     sentiment_lexicon: dict | None = None
+    action_items: dict | None = None
+    tone: dict | None = None
+    key_entities: dict | None = None
 
 
 LAYER1_JSON_SCHEMA = {

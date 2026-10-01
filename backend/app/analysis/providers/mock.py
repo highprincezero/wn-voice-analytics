@@ -1,8 +1,10 @@
 import hashlib
+import re
 
 from app.analysis.prompts import (
     build_chunk_messages,
     build_layer1_messages,
+    build_llm_options_messages,
     build_reduce_messages,
     build_rollup_messages,
 )
@@ -44,6 +46,114 @@ def deterministic_transcript(digest: str) -> str:
     )
 
 
+_ACTION = re.compile(
+    r"\b(?:please|need to|needs to|have to|remember to|will)\s+([^.,;!?]+)", re.IGNORECASE
+)
+_CAPITAL = re.compile(r"(?<![.!?]\s)(?<!^)\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)")
+_NOT_NAMES = {
+    "I", "API", "OK", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday", "January", "February", "March", "April", "May", "June", "July", "August",
+    "September", "October", "November", "December",
+}  # fmt: skip
+_ORG_SUFFIX = ("Inc", "Corp", "LLC", "Ltd", "Company", "Bank", "University")
+_PLACE_WORDS = ("in", "at", "from", "to")
+
+
+def _loudness_trend(windows: list[float]) -> str:
+    if len(windows) < 3:
+        return "too short to show a trend"
+    third = max(1, len(windows) // 3)
+    start = sum(windows[:third]) / third
+    end = sum(windows[-third:]) / third
+    if end > start * 1.2:
+        return "rises near the end"
+    if end < start * 0.8:
+        return "falls toward the end"
+    return "steady"
+
+
+def _pace_word(words_per_minute: float) -> str:
+    if words_per_minute < 110:
+        return "slow"
+    if words_per_minute <= 170:
+        return "conversational"
+    return "brisk"
+
+
+def mock_llm_options(transcript: str, options: list[dict], tools) -> dict:
+    """Deterministic stand-in for the predefined prompts call (tests and local mock mode).
+
+    It calls the same measuring tools the model would, and uses spaCy and the fixed word
+    list for the text options.
+    """
+    from app.analysis.spacy_features import pos_counts, sentiment_lexicon
+
+    chosen = {item.get("option_id"): item.get("params") or {} for item in options}
+    ids = set(chosen)
+    result: dict = {}
+    if "rms_energy" in ids:
+        measured = tools.run("measure_rms", {"window_ms": tools.window_ms})
+        windows = [float(value) for value in measured.get("windows") or []]
+        result["rms_energy"] = {
+            "rms_mean": measured.get("rms_mean", 0.0),
+            "rms_peak": measured.get("rms_peak", 0.0),
+            "interpretation": _loudness_trend(windows),
+        }
+    if "speaking_pace" in ids:
+        measured = tools.run("measure_speaking_pace", {})
+        result["speaking_pace"] = {
+            "word_count": measured["word_count"],
+            "words_per_minute": measured["words_per_minute"],
+            "interpretation": _pace_word(float(measured["words_per_minute"])),
+        }
+    if "pos_counts" in ids:
+        top_n = int(chosen["pos_counts"].get("top_n", 5))
+        result["pos_counts"] = pos_counts(transcript, top_n)
+    if "sentiment_lexicon" in ids:
+        counts = sentiment_lexicon(transcript)
+        total = counts["positive"] + counts["negative"]
+        score = 0.0 if total == 0 else round((counts["positive"] - counts["negative"]) / total, 2)
+        result["sentiment_lexicon"] = {
+            "label": counts["label"],
+            "score": score,
+            "reason": (
+                f"Mock rule: {counts['positive']} positive and {counts['negative']} negative words."
+            ),
+        }
+    if "action_items" in ids:
+        result["action_items"] = {
+            "items": [" ".join(match.split()[:10]) for match in _ACTION.findall(transcript)]
+        }
+    if "tone" in ids:
+        counts = sentiment_lexicon(transcript)
+        label = {"positive": "friendly", "negative": "tense"}.get(counts["label"], "neutral")
+        result["tone"] = {
+            "label": label,
+            "reason": "Mock rule: tone follows the balance of positive and negative words.",
+        }
+    if "key_entities" in ids:
+        people: list[str] = []
+        organizations: list[str] = []
+        places: list[str] = []
+        for match in _CAPITAL.finditer(transcript):
+            name = match.group(1)
+            if name in _NOT_NAMES:
+                continue
+            before = transcript[: match.start()].split()
+            if name.endswith(_ORG_SUFFIX):
+                organizations.append(name)
+            elif before and before[-1].lower() in _PLACE_WORDS:
+                places.append(name)
+            else:
+                people.append(name)
+        result["key_entities"] = {
+            "people": people,
+            "organizations": organizations,
+            "places": places,
+        }
+    return result
+
+
 class MockIntelligence:
     def transcribe(self, audio: bytes, filename: str) -> str:
         digest = hashlib.sha256(audio).hexdigest()
@@ -70,6 +180,12 @@ class MockIntelligence:
         taxonomy = union_taxonomy(partials)
         result = {"summary": render_summary(taxonomy), "taxonomy": taxonomy}
         record_generation("layer1-reduce", "mock", messages, result)
+        return result
+
+    def predefined_prompts(self, transcript: str, options: list[dict], tools) -> dict:
+        messages = build_llm_options_messages(transcript, options)
+        result = mock_llm_options(transcript, options, tools)
+        record_generation("layer2-prompts", "mock", messages, result)
         return result
 
     def speaker_profile(self, audio: bytes, filename: str) -> dict:

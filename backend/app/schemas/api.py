@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SignupRequest(BaseModel):
@@ -28,11 +28,16 @@ class UserResponse(BaseModel):
 
 
 class PromptSelection(BaseModel):
+    # Extra keys are an error (HTTP 422), never silently dropped or passed on.
+    model_config = ConfigDict(extra="forbid")
+
     option_id: str
     params: dict = Field(default_factory=dict)
 
 
 class PromptConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     selections: list[PromptSelection]
 
 

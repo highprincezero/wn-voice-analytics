@@ -120,6 +120,9 @@ def test_empty_analytics_config_runs_every_measure(client, auth):
         "pos_counts",
         "speaking_pace",
         "sentiment_lexicon",
+        "action_items",
+        "tone",
+        "key_entities",
     }
     assert item["layer2"]["rms_energy"]["window_ms"] == 250
     assert len(item["layer2"]["pos_counts"]["top_nouns"]) <= 5

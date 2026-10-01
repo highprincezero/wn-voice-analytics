@@ -38,11 +38,14 @@ def test_whitelist_rejects_unknown_options_and_bad_params(client, auth):
     assert valid.status_code == 200
     assert valid.json()["selections"][0]["params"]["window_ms"] == 500
     listed = client.get("/api/v1/prompts/options").json()["options"]
-    assert {item["id"] for item in listed} == {
-        "rms_energy",
-        "pos_counts",
-        "speaking_pace",
-        "sentiment_lexicon",
+    assert {item["id"]: item["kind"] for item in listed} == {
+        "rms_energy": "llm",
+        "pos_counts": "llm",
+        "speaking_pace": "llm",
+        "sentiment_lexicon": "llm",
+        "action_items": "llm",
+        "tone": "llm",
+        "key_entities": "llm",
     }
 
 

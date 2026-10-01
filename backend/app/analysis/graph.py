@@ -4,7 +4,7 @@ from agent_framework import WorkflowBuilder
 
 from app.analysis.audio_features import measure_duration
 from app.analysis.chunking import chunk_text
-from app.analysis.layer2 import run_layer2
+from app.analysis.llm_options import SignalTools, llm_selected, run_predefined_prompts
 from app.analysis.mcp_audio import fetch_audio_via_mcp
 from app.analysis.progress import current_tracker
 from app.analysis.providers.intelligence import get_intelligence
@@ -149,15 +149,32 @@ def _layer1(state: AnalysisState) -> AnalysisState:
 
 def _layer2(state: AnalysisState) -> AnalysisState:
     _begin("layer2", "Analytics started")
-    with analysis_span("layer2"):
-        # Analytics: optional measures (audio and text) selected from the saved options.
-        state["layer2"] = run_layer2(
-            audio=state["audio_bytes"],
-            transcript=state.get("transcript") or "",
-            duration_sec=float(state.get("duration_sec") or 0),
-            options=state.get("options") or [],
-            wav_ok=bool(state.get("wav_ok")),
-        )
+    options = state.get("options") or []
+    prompts = llm_selected(options)
+    state["layer2"] = {}
+    if prompts:
+        names = ", ".join(item["option_id"] for item in prompts)
+        _note(f"Predefined AI prompts: {names}", stage="layer2")
+        with analysis_span("layer2"):
+            transcript = state.get("transcript") or ""
+            # The measuring tools the model may call (server code, exact numbers).
+            tools = SignalTools(
+                audio=state["audio_bytes"],
+                transcript=transcript,
+                duration_sec=float(state.get("duration_sec") or 0),
+                wav_ok=bool(state.get("wav_ok")),
+                options=prompts,
+            )
+            # One model call with the fixed blocks for the ticked options. Never raises.
+            state["layer2"] = run_predefined_prompts(
+                get_intelligence(),
+                transcript,
+                prompts,
+                tools,
+                blocked=bool(state.get("blocked")),
+            )
+            if tools.called:
+                _note(f"Analytics tools called: {', '.join(tools.called)}", stage="layer2")
     _finish("layer2", "Analytics finished")
     return state
 

@@ -68,22 +68,44 @@ The guardrails cover the prompt configuration a user saves, the parameters of a 
 
 ## Controls
 
-### 1. Whitelist only (Layer 2)
+### 1. Whitelist only, predefined prompts (Layer 2)
 
 `GET /api/v1/prompts/options` returns the catalog. A save is accepted only when every `option_id` is in that catalog, parameters are in the declared set, enums match the allowed values, and integers fall inside the declared range. Unknown keys are rejected. There is no text field for a system prompt, a developer prompt, or a free-form instruction.
 
-The catalog today:
+The catalog today. Every option is a predefined prompt; the text lives in `LLM_OPTION_BLOCKS` in `backend/app/analysis/prompts.py`.
 
-| Option | Parameters | What it computes |
+| Option | Parameters | What the fixed prompt asks for |
 | --- | --- | --- |
-| `rms_energy` | `window_ms` in 100, 250, 500, 1000 | Windowed RMS of the decoded audio (WAV, MP3, M4A, OGG, FLAC) |
-| `pos_counts` | `top_n` from 1 to 20 | spaCy adjective and noun counts |
-| `speaking_pace` | none | Words per minute from the transcript and the measured duration |
-| `sentiment_lexicon` | none | Counts against a fixed word list |
+| `rms_energy` | `window_ms` in 100, 250, 500, 1000 | Call the `measure_rms` tool (windowed RMS of the decoded audio), copy its numbers, add a short trend |
+| `pos_counts` | `top_n` from 1 to 20 | Noun and adjective counts and the top lemmas |
+| `speaking_pace` | none | Call the `measure_speaking_pace` tool (words per minute from the transcript and measured duration), add a short reading |
+| `sentiment_lexicon` | none | positive, neutral, or negative, a score from -1 to 1, and a reason. The id is kept from the earlier lexicon measure so saved choices and the sentiment filter keep working |
+| `action_items` | `max_items` from 1 to 10 | Tasks and follow-ups as short phrases |
+| `tone` | none | formal, casual, tense, friendly, or neutral, and a reason |
+| `key_entities` | `max_items` from 1 to 10 | People, organizations, and places |
 
-Users pick which measures run, and their parameters, in the Analytics settings panel (next to Summarize across files) or with `PUT /api/v1/prompts/config`. All four run at their defaults until a choice is saved, and an empty list also means all four, so the panel asks for at least one. A saved choice applies to new uploads; unchecked measures are skipped.
+Users pick which options run, and their parameters, in the Analytics settings panel (next to Summarize across files) or with `PUT /api/v1/prompts/config`. All seven run at their defaults until a choice is saved, and an empty list also means all seven, so the panel asks for at least one. A saved choice applies to new uploads; unchecked options are skipped.
 
-**Layer 2 design choice.** RMS loudness, noun and adjective counts, speaking pace, and sentiment are deterministic, so they are computed in code (RMS math, spaCy, a fixed word list), not by an LLM. That is more accurate, free, and repeatable, and the user's choices never reach any LLM, so they cannot carry a prompt injection. Choices are checked against a fixed whitelist with typed parameters. Users select and configure them in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI").
+**Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
+
+### Guardrails for Layer 2
+
+Filter parameters:
+
+- The UI offers only checkboxes, select boxes, and number inputs. There is no free-text field.
+- The API is not trusted, because anyone can call it directly. The server re-validates every request against the whitelist.
+- Unknown option ids are rejected (HTTP 400).
+- Parameters are type- and range-checked. For example `window_ms` 123 or `top_n` 21 is rejected.
+- Extra fields, at the top level, in a selection, or in `params`, are rejected with an error (HTTP 422 or 400). They are never silently dropped or passed on.
+- Only the fixed server-side prompt text in `backend/app/analysis/prompts.py` reaches the LLM. User values are validated numbers only, never prompt text.
+
+Audio content:
+
+- The content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) screens the transcript before any LLM call.
+- Blocked transcripts never reach the LLM or chat. Insights and Analytics are skipped.
+- Hardened system prompts treat the transcript as untrusted data inside escaped `<transcript>` markers, name common injection patterns, and never follow commands in it.
+- Output is a strict JSON schema built from the ticked options, then validated again on the server. A bad or missing part is stored as skipped, never as a result.
+- Loudness and pace numbers come from server code only (the `measure_rms` and `measure_speaking_pace` tools). The server writes the tool's exact values over whatever the model returns.
 
 Custom list filters use the same idea. `custom` must be `name:value`, and `name` must be one of `sentiment`, `adjective_count`, `noun_count`, `wpm`, `rms_mean`. Sentiment values must be `positive`, `neutral`, or `negative`. Numeric filters must sit inside a declared range.
 

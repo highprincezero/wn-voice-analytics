@@ -122,15 +122,23 @@ _LAYER2_LABEL = {
     "speaking_pace": "Speaking pace",
     "rms_energy": "Loudness (RMS)",
     "pos_counts": "Nouns & adjectives",
+    "action_items": "Action items",
+    "tone": "Tone",
+    "key_entities": "Key entities",
 }
 # Plain labels for the Analytics parameters in the settings panel.
 _PARAM_LABEL = {
     "window_ms": "Loudness (RMS) window",
     "top_n": "Top nouns/adjectives shown",
+    "max_items": "Most items listed",
 }
 _SKIP_TEXT = {
     "wav_pcm16_required": "Not measured (older run, only 16-bit WAV was read); re-analyze",
     "audio_decode_failed": "The audio could not be decoded",
+    "invalid_output": "The AI reply did not match the expected shape",
+    "llm_failed": "The AI call failed",
+    "content_safety_blocked": "Blocked by the safety check",
+    "no_speech": "No speech to analyze",
 }
 _SENTIMENT_COLOR = {
     "positive": "#1a9d54",
@@ -1382,16 +1390,19 @@ def _layer2_result(option: str, value: dict) -> tuple[str, str]:
         reason = str(value["skipped"])
         return _SKIP_TEXT.get(reason, _nice(reason)), "⏭️ Skipped"
     if option == "sentiment_lexicon":
-        text = (
-            f"{_nice(value.get('label'))} · {value.get('positive', 0)} positive, "
-            f"{value.get('negative', 0)} negative words"
-        )
+        text = f"{_nice(value.get('label'))} · score {_short_num(value.get('score'))}"
     elif option == "speaking_pace":
         text = f"{value.get('words_per_minute', 0)} words/min · {value.get('word_count', 0)} words"
     elif option == "rms_energy":
         text = f"Mean {value.get('rms_mean', 0)} · peak {value.get('rms_peak', 0)}"
     elif option == "pos_counts":
         text = f"{value.get('noun_count', 0)} nouns · {value.get('adjective_count', 0)} adjectives"
+    elif option == "action_items":
+        text = f"{len(value.get('items') or [])} items"
+    elif option == "tone":
+        text = _nice(value.get("label"))
+    elif option == "key_entities":
+        text = ", ".join(_entity_names(value)) or "None named"
     else:
         text = ", ".join(f"{key}: {item}" for key, item in value.items() if key != "windows")
     return text or "—", "✅ Pass"
@@ -1825,6 +1836,18 @@ def _word_line(items: object) -> str:
     return ", ".join(words[:20])
 
 
+def _entity_names(value: dict) -> list[str]:
+    names: list[str] = []
+    for key in ("people", "organizations", "places"):
+        names.extend(str(item) for item in value.get(key) or [] if item)
+    return names
+
+
+def _skipped_row(label: str, value: dict) -> tuple[str, str, str, str, str]:
+    reason = str(value.get("skipped"))
+    return (label, "—", _SKIP_TEXT.get(reason, _nice(reason)), "", "")
+
+
 def _analytics_view(data: dict) -> tuple[list[str], str]:
     """Problems worth a sentence, then one quiet line per measure."""
     notes = []
@@ -1841,29 +1864,44 @@ def _analytics_view(data: dict) -> tuple[list[str], str]:
     if sentiment and not sentiment.get("skipped"):
         label = str(sentiment.get("label") or "").lower()
         tone = {"positive": "ok", "negative": "bad"}.get(label, "")
-        positive = sentiment.get("positive", 0)
-        negative = sentiment.get("negative", 0)
-        detail = f"{positive} positive · {negative} negative"
+        if "score" in sentiment or "reason" in sentiment:
+            detail = f"score {_short_num(sentiment.get('score'))}"
+            if sentiment.get("reason"):
+                detail += f" · {sentiment['reason']}"
+        else:  # older lexicon results
+            positive = sentiment.get("positive", 0)
+            negative = sentiment.get("negative", 0)
+            detail = f"{positive} positive · {negative} negative"
         rows.append(("Sentiment", _nice(sentiment.get("label")), detail, tone, ""))
+    elif sentiment.get("skipped"):
+        rows.append(_skipped_row("Sentiment", sentiment))
     pace = layer2.get("speaking_pace") or {}
     if pace and not pace.get("skipped"):
+        detail = f"{pace.get('word_count', 0)} words"
+        if pace.get("interpretation"):
+            detail += f" · {pace['interpretation']}"
         rows.append(
             (
                 "Pace",
                 f"{_short_num(pace.get('words_per_minute'))} wpm",
-                f"{pace.get('word_count', 0)} words",
+                detail,
                 "",
                 "",
             )
         )
+    elif pace.get("skipped"):
+        rows.append(_skipped_row("Pace", pace))
     energy = layer2.get("rms_energy") or {}
     if energy and not energy.get("skipped"):
         windows = [float(item) for item in energy.get("windows") or []]
+        detail = f"peak {_short_num(energy.get('rms_peak'))}"
+        if energy.get("interpretation"):
+            detail += f" · {energy['interpretation']}"
         rows.append(
             (
                 "Loudness",
                 f"{_short_num(energy.get('rms_mean'))} mean",
-                f"peak {_short_num(energy.get('rms_peak'))}",
+                detail,
                 "",
                 _sparkline(windows),
             )
@@ -1891,6 +1929,36 @@ def _analytics_view(data: dict) -> tuple[list[str], str]:
                 "",
             )
         )
+    elif counts.get("skipped"):
+        rows.append(_skipped_row("Words", counts))
+    tone_value = layer2.get("tone") or {}
+    if tone_value and not tone_value.get("skipped"):
+        rows.append(
+            ("Tone", _nice(tone_value.get("label")), str(tone_value.get("reason") or ""), "", "")
+        )
+    elif tone_value.get("skipped"):
+        rows.append(_skipped_row("Tone", tone_value))
+    actions = layer2.get("action_items") or {}
+    if actions and not actions.get("skipped"):
+        items = [str(item) for item in actions.get("items") or [] if item]
+        rows.append(("Actions", f"{len(items)} items", "; ".join(items), "", ""))
+    elif actions.get("skipped"):
+        rows.append(_skipped_row("Actions", actions))
+    entities = layer2.get("key_entities") or {}
+    if entities and not entities.get("skipped"):
+        parts = []
+        for key, title in (
+            ("people", "people"),
+            ("organizations", "organizations"),
+            ("places", "places"),
+        ):
+            names = [str(item) for item in entities.get(key) or [] if item]
+            if names:
+                parts.append(f"{title}: {', '.join(names)}")
+        count = len(_entity_names(entities))
+        rows.append(("Entities", f"{count} named", " · ".join(parts), "", ""))
+    elif entities.get("skipped"):
+        rows.append(_skipped_row("Entities", entities))
     return notes, _read_html(rows)
 
 
@@ -2936,8 +3004,11 @@ def _analytics_panel(api: ApiClient) -> None:
             specs = option.get("params") or {}
             left, right = st.columns([3, 2], vertical_alignment="center")
             with left:
+                label = str(option.get("label") or _nice(option_id))
+                if option.get("kind") == "llm":
+                    label += " (uses AI)"
                 checked = st.checkbox(
-                    str(option.get("label") or _nice(option_id)),
+                    label,
                     value=current["checked"],
                     key=f"va-analytics-{option_id}",
                 )

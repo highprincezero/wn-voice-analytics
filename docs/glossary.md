@@ -35,6 +35,7 @@ Langfuse is the trace store at port 3000. Each row below is a name on a trace. A
 | AudioChunk | One piece of a long transcript. |
 | AudioReduce | Joins those pieces into one Insights result. |
 | AudioRollup | One summary for a group of recordings. |
+| AudioLayer2Prompts | Analytics for one recording: the ticked predefined prompts, with the measure_rms and measure_speaking_pace tool round trip. |
 | VoiceLayer1 | Earlier name for AudioLayer1. Rows end 2026-09-29. |
 | VoiceRollup | Earlier name for AudioRollup. Rows end 2026-09-29. |
 | speaker-profile | Speaker profile for one recording. Written after that model call succeeds. |
@@ -44,7 +45,7 @@ Langfuse is the trace store at port 3000. Each row below is a name on a trace. A
 | executor.process transcribe | Speech to text. |
 | executor.process shield | Content safety check. A block skips Insights and Analytics. |
 | executor.process layer1 | Insights. A short transcript writes AudioLayer1. A long one writes AudioChunk, then AudioReduce. |
-| executor.process layer2 | Analytics: pace, sentiment, word counts, and loudness. |
+| executor.process layer2 | Analytics: one AudioLayer2Prompts call with the ticked predefined prompts. Loudness and pace come from the measuring tools. |
 | executor.process validate | Check the Insights and Analytics result before it is saved. |
 | executor.process plan | Chat chooses a tool, or none. This step runs in the API. |
 | executor.process tools | Chat runs that tool. This step runs in the API. |

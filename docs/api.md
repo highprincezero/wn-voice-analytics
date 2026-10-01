@@ -75,7 +75,7 @@ flowchart LR
 | Chat `message` | 1 to 2,000 characters |
 | Chat `history` | at most 8, role `user` or `assistant` |
 | Chat tools | `search_files` `get_analysis` `run_summary` `profile_speaker` |
-| Empty Analytics list | All four measures run at their defaults |
+| Empty Analytics list | All seven options run at their defaults |
 
 ## List filters
 
