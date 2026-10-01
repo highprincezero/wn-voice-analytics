@@ -36,10 +36,10 @@ def test_inline_pipeline_records_stage_and_events(client, auth):
         "Transcribe finished",
         "Safety check started",
         "Safety check finished",
-        "Layer 1 started",
-        "Layer 1 finished",
-        "Layer 2 started",
-        "Layer 2 finished",
+        "Insights started",
+        "Insights finished",
+        "Analytics started",
+        "Analytics finished",
         "Results saved",
     ):
         assert needle in text, needle
@@ -87,10 +87,10 @@ def test_blocked_file_skips_layer_stages(client, auth, monkeypatch):
     assert item["stage"] == "saved"
     assert item["skipped_stages"] == ["layer1", "layer2"]
     text = "\n".join(_messages(client, auth))
-    assert "Layer 1 skipped" in text
-    assert "Layer 2 skipped" in text
-    assert "Layer 1 started" not in text
-    assert "Layer 2 started" not in text
+    assert "Insights skipped" in text
+    assert "Analytics skipped" in text
+    assert "Insights started" not in text
+    assert "Analytics started" not in text
     assert "Safety check finished" in text
     assert "Results saved" in text
 

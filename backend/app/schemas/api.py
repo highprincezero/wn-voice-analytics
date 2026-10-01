@@ -42,5 +42,7 @@ class PromptConfigResponse(BaseModel):
 
 class RollupRequest(BaseModel):
     group_by: str = "user"
+    template_id: str | None = None
+    slot: str | None = None
     time_from: datetime | None = None
     time_to: datetime | None = None

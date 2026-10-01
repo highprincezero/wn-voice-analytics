@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS rollup_summaries (
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (user_id, id),
     CONSTRAINT rollup_summaries_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-    CONSTRAINT rollup_summaries_group_chk CHECK (group_by IN ('user', 'taxonomy_label', 'week', 'sentiment')),
+    CONSTRAINT rollup_summaries_group_chk CHECK (group_by IN ('user', 'taxonomy_label', 'day', 'week', 'month', 'sentiment')),
     CONSTRAINT rollup_summaries_trigger_chk CHECK (trigger IN ('schedule', 'on_demand'))
 ) PARTITION BY HASH (user_id);
 
@@ -204,6 +204,62 @@ CREATE TABLE IF NOT EXISTS file_events_p13 PARTITION OF file_events FOR VALUES W
 CREATE TABLE IF NOT EXISTS file_events_p14 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 14);
 CREATE TABLE IF NOT EXISTS file_events_p15 PARTITION OF file_events FOR VALUES WITH (MODULUS 16, REMAINDER 15);
 
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    user_id UUID NOT NULL,
+    id UUID NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (user_id, id),
+    CONSTRAINT chat_sessions_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE IF NOT EXISTS chat_sessions_p0 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE IF NOT EXISTS chat_sessions_p1 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+CREATE TABLE IF NOT EXISTS chat_sessions_p2 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 2);
+CREATE TABLE IF NOT EXISTS chat_sessions_p3 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 3);
+CREATE TABLE IF NOT EXISTS chat_sessions_p4 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 4);
+CREATE TABLE IF NOT EXISTS chat_sessions_p5 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 5);
+CREATE TABLE IF NOT EXISTS chat_sessions_p6 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 6);
+CREATE TABLE IF NOT EXISTS chat_sessions_p7 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 7);
+CREATE TABLE IF NOT EXISTS chat_sessions_p8 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 8);
+CREATE TABLE IF NOT EXISTS chat_sessions_p9 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 9);
+CREATE TABLE IF NOT EXISTS chat_sessions_p10 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 10);
+CREATE TABLE IF NOT EXISTS chat_sessions_p11 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 11);
+CREATE TABLE IF NOT EXISTS chat_sessions_p12 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 12);
+CREATE TABLE IF NOT EXISTS chat_sessions_p13 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 13);
+CREATE TABLE IF NOT EXISTS chat_sessions_p14 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 14);
+CREATE TABLE IF NOT EXISTS chat_sessions_p15 PARTITION OF chat_sessions FOR VALUES WITH (MODULUS 16, REMAINDER 15);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    user_id UUID NOT NULL,
+    id UUID NOT NULL,
+    session_id UUID NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (user_id, id),
+    CONSTRAINT chat_messages_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT chat_messages_session_fk FOREIGN KEY (user_id, session_id) REFERENCES chat_sessions (user_id, id) ON DELETE CASCADE,
+    CONSTRAINT chat_messages_role_chk CHECK (role IN ('user', 'assistant'))
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages_p0 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE IF NOT EXISTS chat_messages_p1 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+CREATE TABLE IF NOT EXISTS chat_messages_p2 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 2);
+CREATE TABLE IF NOT EXISTS chat_messages_p3 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 3);
+CREATE TABLE IF NOT EXISTS chat_messages_p4 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 4);
+CREATE TABLE IF NOT EXISTS chat_messages_p5 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 5);
+CREATE TABLE IF NOT EXISTS chat_messages_p6 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 6);
+CREATE TABLE IF NOT EXISTS chat_messages_p7 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 7);
+CREATE TABLE IF NOT EXISTS chat_messages_p8 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 8);
+CREATE TABLE IF NOT EXISTS chat_messages_p9 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 9);
+CREATE TABLE IF NOT EXISTS chat_messages_p10 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 10);
+CREATE TABLE IF NOT EXISTS chat_messages_p11 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 11);
+CREATE TABLE IF NOT EXISTS chat_messages_p12 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 12);
+CREATE TABLE IF NOT EXISTS chat_messages_p13 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 13);
+CREATE TABLE IF NOT EXISTS chat_messages_p14 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 14);
+CREATE TABLE IF NOT EXISTS chat_messages_p15 PARTITION OF chat_messages FOR VALUES WITH (MODULUS 16, REMAINDER 15);
+
 ALTER TABLE audio_files ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'upload';
 
 CREATE INDEX IF NOT EXISTS audio_files_user_created_idx ON audio_files (user_id, created_at);
@@ -211,4 +267,9 @@ CREATE INDEX IF NOT EXISTS file_events_user_seq_idx ON file_events (user_id, seq
 CREATE INDEX IF NOT EXISTS analyses_user_created_idx ON analyses (user_id, created_at);
 CREATE INDEX IF NOT EXISTS analyses_user_status_idx ON analyses (user_id, status);
 CREATE INDEX IF NOT EXISTS rollup_summaries_user_created_idx ON rollup_summaries (user_id, created_at);
+CREATE INDEX IF NOT EXISTS chat_sessions_user_created_idx ON chat_sessions (user_id, created_at);
+CREATE INDEX IF NOT EXISTS chat_messages_session_seq_idx ON chat_messages (user_id, session_id, seq);
+
+ALTER TABLE rollup_summaries DROP CONSTRAINT IF EXISTS rollup_summaries_group_chk;
+ALTER TABLE rollup_summaries ADD CONSTRAINT rollup_summaries_group_chk CHECK (group_by IN ('user', 'taxonomy_label', 'day', 'week', 'month', 'sentiment'));
 

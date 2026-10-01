@@ -1,18 +1,31 @@
 """Fixed tool set for the chat agent. Every query filters on the caller's user id."""
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.chat.schemas import GetAnalysisArgs, RunSummaryArgs, SearchFilesArgs
-from app.db.models import Analysis, AudioFile
+from app.analysis.audio_features import ensure_pcm16_wav
+from app.analysis.providers.intelligence import get_intelligence
+from app.analysis.speaker_skill import acoustic_profile
+from app.chat.schemas import (
+    GetAnalysisArgs,
+    ProfileSpeakerArgs,
+    RunSummaryArgs,
+    SearchFilesArgs,
+)
+from app.db.models import Analysis, AudioFile, Transcript
 from app.guardrails.safety import get_safety
 from app.jobs.summary_job import run_rollup
+from app.storage.blob import get_blob_store
+
+logger = logging.getLogger(__name__)
 
 # Allow-list of tool names the agent may call.
-TOOL_NAMES = frozenset({"search_files", "get_analysis", "run_summary"})
+TOOL_NAMES = frozenset({"search_files", "get_analysis", "run_summary", "profile_speaker"})
 _SEARCH_LIMIT = 20
 
 # Tool schemas in OpenAI function-calling format: name, description, and JSON Schema
@@ -50,12 +63,17 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "get_analysis",
-            "description": "Fetch one recording's summary, taxonomy, and Layer 2 results.",
+            "description": "Fetch one recording's summary, taxonomy, and Analytics results.",
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["file_id"],
-                "properties": {"file_id": {"type": "string", "description": "File UUID"}},
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "File UUID or the stored filename",
+                    }
+                },
             },
         },
     },
@@ -65,7 +83,7 @@ TOOL_SPECS = [
             "name": "run_summary",
             "description": (
                 "Run an on-demand rollup of the user's completed recordings. "
-                "group_by is user, taxonomy_label, week, or sentiment."
+                "group_by is user, taxonomy_label, day, week, month, or sentiment."
             ),
             "parameters": {
                 "type": "object",
@@ -74,10 +92,32 @@ TOOL_SPECS = [
                 "properties": {
                     "group_by": {
                         "type": "string",
-                        "enum": ["user", "taxonomy_label", "week", "sentiment"],
+                        "enum": ["user", "taxonomy_label", "day", "week", "month", "sentiment"],
                     },
                     "time_from": {"type": "string"},
                     "time_to": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "profile_speaker",
+            "description": (
+                "Run the speaker-profile skill on one recording's stored audio. "
+                "Use this when the user wants a speaker profile or to analyze the voice. "
+                "file_id is optional. Omit it to fetch the newest recording from storage. "
+                "A stored filename is also accepted."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "File UUID or stored filename. Omit for the newest.",
+                    },
                 },
             },
         },
@@ -185,7 +225,15 @@ def get_analysis(db: Session, user_id: uuid.UUID, args: GetAnalysisArgs) -> dict
         .filter(Analysis.user_id == user_id, Analysis.file_id == audio.id)
         .one_or_none()
     )
-    return _file_payload(audio, analysis)
+    transcript = (
+        db.query(Transcript)
+        .filter(Transcript.user_id == user_id, Transcript.file_id == audio.id)
+        .one_or_none()
+    )
+    result = _file_payload(audio, analysis)
+    if transcript is not None and transcript.text:
+        result["transcript"] = _clip(transcript.text, 1200)
+    return result
 
 
 # Tool implementation: on-demand rollup, trimmed so it fits in the prompt.
@@ -218,11 +266,94 @@ def run_summary(db: Session, user_id: uuid.UUID, args: RunSummaryArgs) -> dict:
     return result
 
 
+def _stored_file(db: Session, user_id: uuid.UUID, name: str) -> AudioFile | None:
+    """The account's recording with this filename, newest first."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    if not base:
+        return None
+    return (
+        db.query(AudioFile)
+        .filter(AudioFile.user_id == user_id)
+        .filter(func.lower(AudioFile.original_filename) == base)
+        .order_by(AudioFile.created_at.desc())
+        .first()
+    )
+
+
+def _pinned_file_id(message: str) -> str | None:
+    for line in (message or "").splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("file_id="):
+            continue
+        raw = stripped.split("=", 1)[1].strip()
+        try:
+            return str(uuid.UUID(raw))
+        except ValueError:
+            return None
+    return None
+
+
+def prepare_arguments(
+    db: Session | None,
+    user_id: uuid.UUID,
+    name: str,
+    arguments: dict | None,
+    message: str = "",
+) -> dict:
+    """Use a stored file when the tool was given a filename instead of a UUID."""
+    cleaned = dict(arguments or {})
+    if name not in {"get_analysis", "profile_speaker"}:
+        return cleaned
+    raw = cleaned.get("file_id")
+    text = "" if raw is None else str(raw).strip()
+    if text:
+        try:
+            cleaned["file_id"] = str(uuid.UUID(text))
+            return cleaned
+        except ValueError:
+            pass
+        if db is not None:
+            found = _stored_file(db, user_id, text)
+            if found is not None:
+                cleaned["file_id"] = str(found.id)
+                return cleaned
+    pinned = _pinned_file_id(message)
+    if pinned:
+        cleaned["file_id"] = pinned
+        return cleaned
+    if name == "profile_speaker":
+        cleaned.pop("file_id", None)
+    return cleaned
+
+
+def profile_speaker(db: Session, user_id: uuid.UUID, args: ProfileSpeakerArgs) -> dict:
+    query = db.query(AudioFile).filter(AudioFile.user_id == user_id)
+    if args.file_id is not None:
+        query = query.filter(AudioFile.id == args.file_id)
+    audio = query.order_by(AudioFile.created_at.desc()).first()
+    if audio is None:
+        return {"error": "not_found"}
+    try:
+        data = get_blob_store().download(audio.storage_key)
+    except FileNotFoundError:
+        return {"error": "not_found"}
+    playable = ensure_pcm16_wav(data)
+    try:
+        result = get_intelligence().speaker_profile(playable, audio.original_filename)
+    except Exception:
+        logger.warning("speaker profile fell back to the audio measure", exc_info=True)
+        result = acoustic_profile(playable, audio.original_filename)
+    result["filename"] = audio.original_filename
+    result["file_id"] = str(audio.id)
+    return result
+
+
 # Tool name -> Pydantic model that validates that tool's arguments.
 _MODELS = {
     "search_files": SearchFilesArgs,
     "get_analysis": GetAnalysisArgs,
     "run_summary": RunSummaryArgs,
+    "profile_speaker": ProfileSpeakerArgs,
 }
 
 # Tool name -> Python function that implements it (the dispatch table).
@@ -230,13 +361,21 @@ _FUNCS = {
     "search_files": search_files,
     "get_analysis": get_analysis,
     "run_summary": run_summary,
+    "profile_speaker": profile_speaker,
 }
 
 
 # Single dispatcher: validate arguments, then call the mapped function.
-def execute_tool(db: Session, user_id: uuid.UUID, name: str, arguments: dict) -> dict:
+def execute_tool(
+    db: Session,
+    user_id: uuid.UUID,
+    name: str,
+    arguments: dict,
+    message: str = "",
+) -> dict:
     if name not in TOOL_NAMES:
         return {"error": "unknown_tool"}
+    arguments = prepare_arguments(db, user_id, name, arguments, message)
     model = _MODELS[name]
     try:
         # model_validate turns the raw dict into typed args (or raises ValidationError).

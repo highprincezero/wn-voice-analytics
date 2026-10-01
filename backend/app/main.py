@@ -25,7 +25,7 @@ async def lifespan(_app: FastAPI):
 # App factory: builds and configures the FastAPI instance.
 def create_app() -> FastAPI:
     # FastAPI(...): the ASGI app; lifespan= hooks in the startup/shutdown function above.
-    application = FastAPI(title="Voice Analytics", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(title="Audio Analytics", version="0.1.0", lifespan=lifespan)
     # Optional OpenTelemetry tracing of every request (enabled via settings).
     setup_telemetry(application)
     # Mounts all API routes (prefixed /api/v1) from api/router.py.

@@ -16,6 +16,8 @@ os.environ["CHUNK_CHARS"] = "4000"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["RATE_LIMIT_BACKEND"] = "memory"
 os.environ["MOCK_STAGE_DELAY_SEC"] = "0"
+# Compose sets MCP_AUDIO_URL. Tests keep audio in the memory store.
+os.environ["MCP_AUDIO_URL"] = ""
 
 import pytest
 from fastapi.testclient import TestClient

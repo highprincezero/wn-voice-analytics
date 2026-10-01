@@ -3,12 +3,12 @@ from collections.abc import Callable
 from app.config import get_settings
 
 
-def map_reduce_summaries(
+def summarize_group(
     texts: list[str],
     summarize_many: Callable[[list[str]], str],
     depth: int = 0,
 ) -> str:
-    """Binary map-reduce over summary strings so a rollup stays inside the chunk budget."""
+    """Split a long group of summaries so one summary stays inside the chunk budget."""
     cleaned = [text.strip() for text in texts if text and text.strip()]
     if not cleaned:
         return "No recordings in this group."
@@ -17,6 +17,6 @@ def map_reduce_summaries(
     if len(cleaned) == 1 or total <= limit or depth >= 6:
         return summarize_many(cleaned[:50])
     mid = max(1, len(cleaned) // 2)
-    left = map_reduce_summaries(cleaned[:mid], summarize_many, depth + 1)
-    right = map_reduce_summaries(cleaned[mid:], summarize_many, depth + 1)
+    left = summarize_group(cleaned[:mid], summarize_many, depth + 1)
+    right = summarize_group(cleaned[mid:], summarize_many, depth + 1)
     return summarize_many([left, right])

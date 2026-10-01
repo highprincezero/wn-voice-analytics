@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 
@@ -10,6 +11,7 @@ from app.analysis.prompts import (
     build_rollup_messages,
 )
 from app.analysis.schemas import CHUNK_JSON_SCHEMA, LAYER1_JSON_SCHEMA
+from app.analysis.speaker_skill import SKILL_PROMPT
 from app.analysis.tracing import record_generation
 from app.config import get_settings
 
@@ -36,6 +38,39 @@ _ROLLUP_SCHEMA = {
     "additionalProperties": False,
     "required": ["summary"],
     "properties": {"summary": {"type": "string"}},
+}
+
+_PROFILE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["voices"],
+    "properties": {
+        "voices": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "voice_signature",
+                    "vocal_presentation",
+                    "age_band",
+                    "accent_region",
+                    "speaking_style",
+                    "evidence",
+                    "limits",
+                ],
+                "properties": {
+                    "voice_signature": {"type": "string"},
+                    "vocal_presentation": {"type": "string"},
+                    "age_band": {"type": "string"},
+                    "accent_region": {"type": "string"},
+                    "speaking_style": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "limits": {"type": "string"},
+                },
+            },
+        }
+    },
 }
 
 
@@ -111,14 +146,77 @@ class AzureIntelligence:
 
     # Public methods used by the graph: each maps to one prompt + one JSON schema.
     def summarize_and_classify(self, transcript: str) -> dict:
-        return self._chat(build_layer1_messages(transcript), LAYER1_JSON_SCHEMA, "VoiceLayer1")
+        return self._chat(build_layer1_messages(transcript), LAYER1_JSON_SCHEMA, "AudioLayer1")
 
     def summarize_chunk(self, chunk: str) -> dict:
-        return self._chat(build_chunk_messages(chunk), CHUNK_JSON_SCHEMA, "VoiceChunk")
+        return self._chat(build_chunk_messages(chunk), CHUNK_JSON_SCHEMA, "AudioChunk")
 
     def reduce_summaries(self, partials: list[dict]) -> dict:
-        return self._chat(build_reduce_messages(partials), LAYER1_JSON_SCHEMA, "VoiceReduce")
+        return self._chat(build_reduce_messages(partials), LAYER1_JSON_SCHEMA, "AudioReduce")
 
     def rollup_summary(self, summaries: list[str]) -> str:
-        parsed = self._chat(build_rollup_messages(summaries), _ROLLUP_SCHEMA, "VoiceRollup")
+        parsed = self._chat(build_rollup_messages(summaries), _ROLLUP_SCHEMA, "AudioRollup")
         return str(parsed["summary"])
+
+    def speaker_profile(self, audio: bytes, filename: str) -> dict:
+        self._require()
+        settings = get_settings()
+        payload = base64.b64encode(audio[:4_000_000]).decode("ascii")
+        audio_format = "mp3" if filename.lower().endswith(".mp3") else "wav"
+        messages = [
+            {"role": "system", "content": SKILL_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this audio. Return one profile per voice."},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": payload, "format": audio_format},
+                    },
+                ],
+            },
+        ]
+        deployments = []
+        for name in (
+            settings.azure_openai_chat_deployment,
+            settings.azure_openai_transcribe_deployment,
+        ):
+            if name and name not in deployments:
+                deployments.append(name)
+        last_error: Exception | None = None
+        for deployment in deployments:
+            try:
+                return self._profile_call(deployment, messages)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("speaker profile failed: %s", type(exc).__name__)
+        assert last_error is not None
+        raise last_error
+
+    def _profile_call(self, deployment: str, messages: list[dict]) -> dict:
+        settings = get_settings()
+        url = (
+            f"{settings.azure_openai_endpoint.rstrip('/')}/openai/deployments/"
+            f"{deployment}/chat/completions"
+            f"?api-version={settings.azure_openai_api_version}"
+        )
+        body = {
+            "messages": messages,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "SpeakerProfile",
+                    "strict": True,
+                    "schema": _PROFILE_SCHEMA,
+                },
+            },
+            **chat_sampling_fields(),
+        }
+        headers = {"api-key": settings.azure_openai_api_key, "Content-Type": "application/json"}
+        with httpx.Client(timeout=120) as client:
+            response = client.post(url, headers=headers, json=body)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        record_generation("speaker-profile", deployment, [], parsed)
+        return parsed

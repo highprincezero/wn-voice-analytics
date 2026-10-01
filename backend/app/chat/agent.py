@@ -1,4 +1,7 @@
-"""LangGraph tool-calling agent. Mock mode picks tools with fixed rules."""
+"""Microsoft Agent Framework chat: plan -> tools -> compose.
+
+Azure mode: the compose model writes every reply. Mock mode uses fixed rules.
+"""
 
 import json
 import logging
@@ -8,20 +11,24 @@ from datetime import datetime, timedelta
 from typing import TypedDict
 
 import httpx
-from langgraph.graph import END, StateGraph
+from agent_framework import WorkflowBuilder
 from sqlalchemy.orm import Session
 
 from app.analysis.providers.azure import chat_sampling_fields
 from app.analysis.tracing import analysis_span
+from app.chat.memory import asks_earlier_question, earlier_question_reply, previous_question
 from app.chat.prompts import (
+    CAPABILITIES,
     CHAT_REPLY_SCHEMA,
     build_compose_messages,
     build_planner_messages,
 )
 from app.chat.schemas import ChatReplyBody
-from app.chat.tools import TOOL_NAMES, TOOL_SPECS, execute_tool
+from app.chat.tools import TOOL_NAMES, TOOL_SPECS, execute_tool, prepare_arguments
 from app.config import get_settings
+from app.db.models import AudioFile
 from app.timeutil import utcnow
+from app.workflow import Finish, Step, run_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,19 @@ _TAXONOMY = re.compile(
     r"\b(?:about|taxonomy|topic|mentioning|labeled)\s+([a-z0-9]{2,40})",
     re.IGNORECASE,
 )
+# Fixed replies below are for mock mode, or when the compose model call fails.
+_HELP_REPLY = (
+    "Ask about your recordings. For example: summarize this recording, what topics came up, "
+    "or summarize my files by topic. You can also ask for one file by its id."
+)
+_CAPABILITIES_REPLY = (
+    "I transcribe a recording, write the summary and the topics, "
+    "and measure pace and sentiment. "
+    "Ask what events are coming up, for a summary by topic, or for one recording by its id."
+)
+_GREETING_REPLY = "Hello. Ask about a recording, or send one."
+_CANT_DETERMINE = "I can't seem to determine that from this recording."
+_GREETING = re.compile(r"^(?:hey|hi|hello|hiya|yo)(?:\s+there)?$")
 
 
 # Chat graph state: the question, the chosen tool + args, the tool output, and the reply.
@@ -93,6 +113,10 @@ def _search_arguments(text: str) -> dict:
 def _group_by(text: str) -> str:
     if "sentiment" in text:
         return "sentiment"
+    if any(token in text for token in ("per day", "by day", "each day", "daily")):
+        return "day"
+    if any(token in text for token in ("per month", "by month", "each month", "monthly")):
+        return "month"
     if "week" in text and "topic" not in text and "taxonomy" not in text:
         return "week"
     if "topic" in text or "taxonomy" in text or "label" in text:
@@ -101,11 +125,147 @@ def _group_by(text: str) -> str:
 
 
 def _wants_rollup(text: str) -> bool:
-    return any(token in text for token in ("summarize", "summary", "rollup", "group by"))
+    return any(token in text for token in ("summarize", "summary", "rollup", "group by", "trend"))
+
+
+# Voice-trait questions go to profile_speaker: gender, age, accent, emotion, who is speaking.
+_VOICE_TRAIT = re.compile(
+    r"\b(?:gender|sex|male|female|man or (?:a )?woman|woman or (?:a )?man|accent|dialect"
+    r"|emotions?|emotional|mood|age|how old)\b"
+)
+_ALWAYS_VOICE = re.compile(
+    r"\b(?:gender|male|female|man or (?:a )?woman|woman or (?:a )?man|accent)\b"
+)
+_VOICE_SUBJECT = re.compile(
+    r"\b(?:speakers?|voices?|person|caller|narrator|he|she|they|him|her|them|sounds?)\b"
+)
+_WHO_SPEAKS = re.compile(r"\bwho(?:'s| is| was)? (?:the )?(?:speaking|talking|speaker)\b")
+
+
+def _wants_profile(text: str) -> bool:
+    lowered = " ".join(text.replace("\u2019", "'").lower().split())
+    if "profile" in lowered and ("voice" in lowered or "speaker" in lowered):
+        return True
+    if _WHO_SPEAKS.search(lowered) or _ALWAYS_VOICE.search(lowered):
+        return True
+    if _VOICE_TRAIT.search(lowered) and _VOICE_SUBJECT.search(lowered):
+        return True
+    phrases = (
+        "analyze the voice",
+        "analyse the voice",
+        "analyze the speaker",
+        "analyse the speaker",
+        "describe the voice",
+        "describe the speaker",
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _profile_choice(message: str) -> dict | None:
+    if not _wants_profile(message):
+        return None
+    arguments: dict = {}
+    found = _UUID.findall(message)
+    if found:
+        arguments["file_id"] = found[0]
+    return {"intent": "profile", "tool_name": "profile_speaker", "arguments": arguments}
 
 
 # Mock-mode planner: keyword rules decide which tool to call and with what arguments.
+def _avoid_repeat(reply: str, history: list) -> str:
+    previous = ""
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            previous = (item.get("content") or "").strip()
+            break
+    if not previous or previous != reply.strip():
+        return reply
+    if reply.strip() == _CAPABILITIES_REPLY:
+        return _HELP_REPLY
+    return _CAPABILITIES_REPLY
+
+
+def _asks_greeting(message: str) -> bool:
+    """True for hi or hello, including extra punctuation such as hello???."""
+    bare = re.sub(r"[^a-z\s]", "", " ".join((message or "").lower().split()))
+    return bool(_GREETING.fullmatch(bare.strip()))
+
+
+def _asks_capabilities(message: str) -> bool:
+    text = " ".join(message.lower().split())
+    phrases = (
+        "what can you do",
+        "what can u do",
+        "what do you do",
+        "how can you help",
+        "what can you help",
+        "who are you",
+        "what are you",
+    )
+    if any(phrase in text for phrase in phrases):
+        return True
+    return text in {"help", "help me"}
+
+
+_SET_WORD = re.compile(r"\b(recordings?|files?|calls?)\b")
+
+
+def _asks_for_the_set(text: str) -> bool:
+    """True when the question asks to see the set of recordings."""
+    if not _SET_WORD.search(text):
+        return False
+    asks = ("list", "show", "which", "how many", "all my")
+    return any(phrase in text for phrase in asks)
+
+
+def _named_file_choice(message: str) -> dict | None:
+    """One file id written in the question opens that recording."""
+    if _wants_rollup(message.lower()):
+        return None
+    found = _UUID.findall(message)
+    if len(found) != 1:
+        return None
+    return {
+        "intent": "analysis",
+        "tool_name": "get_analysis",
+        "arguments": {"file_id": found[0]},
+    }
+
+
+def _about_what_it_says(message: str) -> bool:
+    """True when the question is about what one recording says."""
+    text = " ".join((message or "").replace("\u2019", "'").lower().split())
+    if _asks_for_the_set(text):
+        return False
+    if "first word" in text:
+        return True
+    return any(word in text for word in ("say", "said", "saying"))
+
+
+def _newest_file_choice(db: Session, user_id: uuid.UUID) -> dict | None:
+    audio = (
+        db.query(AudioFile)
+        .filter(AudioFile.user_id == user_id)
+        .order_by(AudioFile.created_at.desc())
+        .first()
+    )
+    if audio is None:
+        return None
+    return {
+        "intent": "analysis",
+        "tool_name": "get_analysis",
+        "arguments": {"file_id": str(audio.id)},
+    }
+
+
 def plan_with_rules(message: str) -> dict:
+    if _asks_greeting(message):
+        return {"intent": "greeting", "tool_name": "", "arguments": {}}
+    if _asks_capabilities(message):
+        return {"intent": "capabilities", "tool_name": "", "arguments": {}}
+    profile = _profile_choice(message)
+    if profile is not None:
+        return profile
     text = message.lower()
     found = _UUID.findall(message)
     if found and not _wants_rollup(text):
@@ -194,6 +354,55 @@ def _topics(taxonomy: dict | None) -> str:
     return f"Professional: {professional}. Personal: {personal}. Upcoming: {events}."
 
 
+def _asked(message: str) -> str:
+    """The question, without the file id line added for the planner."""
+    kept = []
+    for line in (message or "").splitlines():
+        if line.strip().lower().startswith("file_id="):
+            continue
+        kept.append(line)
+    text = "\n".join(kept).strip()
+    return text or (message or "")
+
+
+def _fit_reply(question: str, reply: str) -> str:
+    """A repeated question or a raw tool error becomes a plain sentence."""
+    text = (reply or "").strip()
+    if not text:
+        return _CANT_DETERMINE
+    flat = " ".join(text.split())
+    lowered = flat.lower()
+    if "invalid_arguments" in lowered or "{'error'" in lowered or '{"error"' in lowered:
+        return _CANT_DETERMINE
+    asked = " ".join(_asked(question).split())
+    # Short messages such as "hi" are not trimmed: "Hi there" is not a repeated question.
+    repeated = (
+        len(asked.split()) >= 3
+        and lowered.startswith(asked.lower())
+        and not flat[len(asked) : len(asked) + 1].isalnum()
+    )
+    if repeated:
+        rest = flat[len(asked) :].lstrip(" ?.!:;")
+        if not rest:
+            return _CANT_DETERMINE
+        return rest if rest.endswith((".", "!", "?")) else f"{rest}."
+    return text
+
+
+def _answer_sentence(question: str, reply: str) -> str:
+    """A one-word reply to a first-word question becomes a sentence."""
+    answer = " ".join((reply or "").split())
+    asked = " ".join((question or "").replace("\u2019", "'").lower().split())
+    if "first word" not in asked or not answer:
+        return (reply or "").strip()
+    if "first word" in answer.lower():
+        return answer if answer.endswith(".") else f"{answer}."
+    tokens = answer.strip(".,!?:;\"'").split()
+    if len(tokens) == 1 and tokens[0]:
+        return f"The first word is {tokens[0]}."
+    return answer if answer.endswith(".") else f"{answer}."
+
+
 def _bound(text: str) -> str:
     cleaned = " ".join(text.split()) if "\n" not in text else text.strip()
     cleaned = cleaned.strip() or "I could not build an answer from the tools."
@@ -208,6 +417,8 @@ def _compose_intent(intent: str, tool_name: str, message: str) -> str:
         return intent
     if tool_name == "run_summary":
         return "summary"
+    if tool_name == "profile_speaker":
+        return "profile"
     if tool_name == "get_analysis":
         return "analysis"
     if tool_name == "search_files":
@@ -218,17 +429,66 @@ def _compose_intent(intent: str, tool_name: str, message: str) -> str:
     return "help"
 
 
+_UNHEARD = "not enough voice to tell"
+
+
+def _heard(value: object) -> str:
+    text = str(value or "").strip().rstrip(".")
+    if text.lower() in {"", _UNHEARD}:
+        return ""
+    return text
+
+
+def _profile_sentence(voice: dict) -> str:
+    """One line. Empty traits stay out of the sentence."""
+    signature = _heard(voice.get("voice_signature"))
+    traits = []
+    labels = (
+        ("Presentation", "vocal_presentation"),
+        ("Age band", "age_band"),
+        ("Accent", "accent_region"),
+        ("Style", "speaking_style"),
+    )
+    for label, key in labels:
+        value = _heard(voice.get(key))
+        if value:
+            traits.append(f"{label}: {value}.")
+    evidence = _heard(voice.get("evidence"))
+    limits = _heard(voice.get("limits"))
+    if not signature and not traits:
+        reason = evidence or limits or "Not enough voice to tell."
+        return reason if reason.endswith(".") else f"{reason}."
+    parts = []
+    if signature:
+        lead = signature if signature.lower().startswith("estimate") else f"Estimate. {signature}"
+        parts.append(lead if lead.endswith(".") else f"{lead}.")
+    parts.extend(traits)
+    for extra in (evidence, limits):
+        if extra:
+            parts.append(extra if extra.endswith(".") else f"{extra}.")
+    return " ".join(parts)
+
+
 # Deterministic reply builder; also the fallback if the LLM compose step fails.
 def compose_with_rules(intent: str, tool_result: dict) -> str:
     if tool_result.get("error") == "not_found":
+        if intent == "profile":
+            return "I could not find a recording to profile."
         return "I could not find that recording on your account."
     if tool_result.get("error") == "rejected":
         return "That filter was rejected by content safety."
     if tool_result.get("error"):
-        return (
-            "I can search your files by date, duration, or taxonomy, "
-            "open one file by id, or summarize them."
-        )
+        return _CANT_DETERMINE
+    if intent == "profile":
+        voices = tool_result.get("voices") or []
+        filename = tool_result.get("filename") or "recording"
+        if not voices:
+            return f"No voice was heard on {filename}."
+        lines = [filename]
+        for voice in voices:
+            if isinstance(voice, dict):
+                lines.append(_profile_sentence(voice))
+        return _bound("\n".join(lines))
     if intent == "upcoming":
         lines: list[str] = []
         for item in tool_result.get("items") or []:
@@ -254,7 +514,10 @@ def compose_with_rules(intent: str, tool_result: dict) -> str:
         extra = _layer2_bits(tool_result.get("layer2"))
         line = f"{filename}: {summary} {_topics(tool_result.get('taxonomy'))}"
         if extra:
-            line = f"{line} Layer 2: {extra}."
+            line = f"{line} Analytics: {extra}."
+        spoken = " ".join(str(tool_result.get("transcript") or "").split())
+        if spoken:
+            line = f"{line} Transcript: {spoken[:240]}"
         return _bound(line)
     if intent in {"inventory", "model"}:
         total = tool_result.get("total")
@@ -266,13 +529,14 @@ def compose_with_rules(intent: str, tool_result: dict) -> str:
         for item in (tool_result.get("items") or [])[:8]:
             summary = item.get("summary") or item.get("status")
             extra = _layer2_bits(item.get("layer2"))
-            suffix = f" Layer 2: {extra}." if extra else ""
+            suffix = f" Analytics: {extra}." if extra else ""
             lines.append(f"{item['filename']} ({item.get('duration_sec')}s): {summary}.{suffix}")
         return _bound("\n".join(lines))
-    return (
-        "Ask about your recordings. For example: what upcoming events did I mention this week, "
-        "or summarize my files by topic. You can also ask for one file by its id."
-    )
+    if intent == "greeting":
+        return _GREETING_REPLY
+    if intent == "capabilities":
+        return _CAPABILITIES_REPLY
+    return _HELP_REPLY
 
 
 # Raw REST chat call; optionally advertises tools and/or forces a JSON schema reply.
@@ -312,10 +576,17 @@ def plan_with_azure(message: str, history: list[dict]) -> dict:
     return choice
 
 
-# Step 3 with the LLM: turn the tool result into a user-facing answer (structured JSON).
-def compose_with_azure(message: str, tool_name: str, tool_result: dict) -> str:
+# Step 3 with the LLM: write the user-facing reply (structured JSON).
+def compose_with_azure(
+    message: str,
+    tool_name: str,
+    tool_result: dict,
+    intent: str = "",
+    context: dict | None = None,
+    previous_reply: str = "",
+) -> str:
     message_body = _azure_chat(
-        build_compose_messages(message, tool_name, tool_result),
+        build_compose_messages(message, tool_name, tool_result, intent, context, previous_reply),
         None,
         CHAT_REPLY_SCHEMA,
     )
@@ -323,12 +594,118 @@ def compose_with_azure(message: str, tool_name: str, tool_result: dict) -> str:
     return parse_structured_reply(json.loads(content))
 
 
-# Builds the agent graph: plan -> (tools) -> compose -> END. One tool call per turn,
-# not an open-ended loop. Nodes are closures so they can use db/user_id.
+# Plain meanings of tool errors. The model sees these, never the raw error.
+_ERROR_SUMMARIES = {
+    "not_found": "That recording is not on this account.",
+    "rejected": "Content safety rejected that filter.",
+    "invalid_arguments": "The request did not match a recording or a filter the tools accept.",
+    "unknown_tool": "That request is not one of the things this assistant can do.",
+}
+_ERROR_DEFAULT = "The tools could not answer that from this recording."
+_NO_TOOL_INTENTS = {"greeting", "capabilities", "help"}
+
+
+def _error_summary(intent: str, error: object) -> str:
+    if error == "not_found" and intent == "profile":
+        return "No recording was found on this account to profile."
+    return _ERROR_SUMMARIES.get(str(error), _ERROR_DEFAULT)
+
+
+def _previous_reply(history: list) -> str:
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            return str(item.get("content") or "").strip()
+    return ""
+
+
+def compose_inputs(intent: str, tool_name: str, tool_result: dict, history: list) -> dict:
+    """What the compose model sees: the turn kind, the tool result, and context."""
+    if intent == "memory":
+        return {
+            "intent": "memory",
+            "tool_result": {},
+            "context": {"previous_question": previous_question(history)},
+        }
+    if tool_result.get("error"):
+        return {
+            "intent": "tool_error",
+            "tool_result": {},
+            "context": {"error_summary": _error_summary(intent, tool_result.get("error"))},
+        }
+    if not tool_name or intent in _NO_TOOL_INTENTS:
+        turn = intent if intent in _NO_TOOL_INTENTS else "help"
+        return {
+            "intent": turn,
+            "tool_result": {},
+            "context": {"capabilities": list(CAPABILITIES)},
+        }
+    return {"intent": intent, "tool_result": tool_result, "context": {}}
+
+
+def _rules_reply(intent: str, asked: str, tool_result: dict, history: list) -> str:
+    """Mock-mode reply, also used when the compose model call fails."""
+    if intent == "memory":
+        return earlier_question_reply(history)
+    if intent == "greeting":
+        return _GREETING_REPLY
+    reply = _avoid_repeat(compose_with_rules(intent, tool_result), history)
+    reply = _fit_reply(asked, reply)
+    return _answer_sentence(asked, reply)
+
+
+def _has_tool(state: dict) -> bool:
+    return bool(state.get("tool_name"))
+
+
+def _no_tool(state: dict) -> bool:
+    return not state.get("tool_name")
+
+
+# plan -> tools -> compose, or plan -> compose. One tool call per turn.
+# Nodes are closures so they can use db and user_id.
 def build_chat_graph(db: Session, user_id: uuid.UUID):
     # Node 1: decide which tool (if any) to call; LLM in azure mode, rules in mock mode.
+    # Memory, greeting, and capabilities pick no tool here; compose still writes the reply.
+    # Profile, a named file id, and "what it says" pick their tool without the planner.
     def plan(state: ChatState) -> ChatState:
         with analysis_span("chat.plan"):
+            if asks_earlier_question(state.get("message") or ""):
+                state["intent"] = "memory"
+                state["tool_name"] = ""
+                state["tool_arguments"] = {}
+                return state
+            if _asks_greeting(state.get("message") or ""):
+                state["intent"] = "greeting"
+                state["tool_name"] = ""
+                state["tool_arguments"] = {}
+                return state
+            if _asks_capabilities(state.get("message") or ""):
+                state["intent"] = "capabilities"
+                state["tool_name"] = ""
+                state["tool_arguments"] = {}
+                return state
+            profile = _profile_choice(state.get("message") or "")
+            if profile is not None:
+                state["intent"] = profile["intent"]
+                state["tool_name"] = profile["tool_name"]
+                state["tool_arguments"] = profile["arguments"]
+                return state
+            message = state.get("message") or ""
+            named = _named_file_choice(message)
+            if named is not None:
+                state["intent"] = named["intent"]
+                state["tool_name"] = named["tool_name"]
+                state["tool_arguments"] = named["arguments"]
+                logger.info("chat plan user=%s tool=%s", user_id, state["tool_name"])
+                return state
+            if _about_what_it_says(message):
+                newest = _newest_file_choice(db, user_id)
+                if newest is not None:
+                    state["intent"] = newest["intent"]
+                    state["tool_name"] = newest["tool_name"]
+                    state["tool_arguments"] = newest["arguments"]
+                    logger.info("chat plan user=%s tool=%s", user_id, state["tool_name"])
+                    return state
             if get_settings().llm_provider == "azure":
                 choice = plan_with_azure(state.get("message") or "", state.get("history") or [])
             else:
@@ -342,64 +719,74 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
     # Node 2: run the chosen tool, always scoped to the caller's user_id.
     def tools(state: ChatState) -> ChatState:
         with analysis_span("chat.tool"):
+            name = state.get("tool_name") or ""
+            arguments = prepare_arguments(
+                db,
+                user_id,
+                name,
+                state.get("tool_arguments") or {},
+                state.get("message") or "",
+            )
+            state["tool_arguments"] = arguments
             state["tool_result"] = execute_tool(
                 db,
                 user_id,
-                state.get("tool_name") or "",
-                state.get("tool_arguments") or {},
-            )
-        return state
-
-    # Node 3: write the final reply from the tool result.
-    def compose(state: ChatState) -> ChatState:
-        with analysis_span("chat.compose"):
-            intent = _compose_intent(
-                state.get("intent") or "help",
-                state.get("tool_name") or "",
+                name,
+                arguments,
                 state.get("message") or "",
             )
-            tool_result = state.get("tool_result") or {}
-            fallback = compose_with_rules(intent, tool_result)
-            if get_settings().llm_provider == "azure" and state.get("tool_name"):
-                try:
-                    state["reply"] = _bound(
-                        compose_with_azure(
-                            state.get("message") or "",
-                            state.get("tool_name") or "",
-                            tool_result,
-                        )
-                    )
-                except Exception:
-                    # If the LLM fails, fall back to the rule-based reply instead of erroring.
-                    logger.warning("chat compose fell back to rules", exc_info=True)
-                    state["reply"] = fallback
-            else:
-                state["reply"] = fallback
         return state
 
-    # Routing function: go to 'tools' if a tool was chosen, otherwise straight to 'compose'.
-    def route(state: ChatState) -> str:
-        if state.get("tool_name"):
-            return "tools"
-        return "compose"
+    # Node 3: write the final reply. In azure mode the compose model always writes it.
+    def compose(state: ChatState) -> ChatState:
+        with analysis_span("chat.compose"):
+            tool_name = state.get("tool_name") or ""
+            intent = _compose_intent(
+                state.get("intent") or "help",
+                tool_name,
+                state.get("message") or "",
+            )
+            asked = _asked(state.get("message") or "")
+            history = state.get("history") or []
+            tool_result = state.get("tool_result") or {}
+            if get_settings().llm_provider != "azure":
+                state["reply"] = _rules_reply(intent, asked, tool_result, history)
+                return state
+            inputs = compose_inputs(intent, tool_name, tool_result, history)
+            try:
+                written = compose_with_azure(
+                    asked,
+                    tool_name,
+                    inputs["tool_result"],
+                    intent=inputs["intent"],
+                    context=inputs["context"],
+                    previous_reply=_previous_reply(history),
+                )
+            except Exception:
+                # Only a failed model call gets the fixed reply.
+                logger.warning("chat compose fell back to rules", exc_info=True)
+                state["reply"] = _rules_reply(intent, asked, tool_result, history)
+                return state
+            reply = _fit_reply(asked, _bound(written))
+            state["reply"] = _answer_sentence(asked, reply)
+        return state
 
-    # StateGraph + add_node/add_edge/add_conditional_edges: same pattern as analysis/graph.py.
-    graph = StateGraph(ChatState)
-    graph.add_node("plan", plan)
-    graph.add_node("tools", tools)
-    graph.add_node("compose", compose)
-    graph.set_entry_point("plan")
-    # Conditional edge: route(state)'s return value picks the next node from this map.
-    graph.add_conditional_edges("plan", route, {"tools": "tools", "compose": "compose"})
-    graph.add_edge("tools", "compose")
-    graph.add_edge("compose", END)
-    # compile() returns the runnable graph.
-    return graph.compile()
+    plan_step = Step("plan", plan)
+    tools_step = Step("tools", tools)
+    compose_step = Finish("compose", compose)
+    workflow = (
+        WorkflowBuilder(start_executor=plan_step, name="chat")
+        .add_edge(plan_step, tools_step, condition=_has_tool)
+        .add_edge(plan_step, compose_step, condition=_no_tool)
+        .add_edge(tools_step, compose_step)
+        .build()
+    )
+    return workflow
 
 
-# API entry point: invoke() runs the graph with an initial state and returns the final one.
 def run_chat_agent(db: Session, user_id: uuid.UUID, message: str, history: list[dict]) -> dict:
-    result = build_chat_graph(db, user_id).invoke(
+    result = run_workflow(
+        build_chat_graph(db, user_id),
         {
             "message": message,
             "history": history,
@@ -408,7 +795,7 @@ def run_chat_agent(db: Session, user_id: uuid.UUID, message: str, history: list[
             "tool_arguments": {},
             "tool_result": {},
             "reply": "",
-        }
+        },
     )
     # Echo the tool call back to the UI so it can show which tool ran and with what.
     tool_calls = []

@@ -1,9 +1,9 @@
-"""Whitelist of Layer 2 options. Users select these; they never supply a system prompt."""
+"""Whitelist of Analytics measures. Callers never supply a system prompt."""
 
 CATALOG: dict[str, dict] = {
     "rms_energy": {
         "label": "RMS energy",
-        "description": "Windowed root-mean-square energy of a 16-bit PCM WAV file.",
+        "description": "Windowed RMS energy of the decoded audio (WAV, MP3, M4A, OGG, FLAC).",
         "params": {
             "window_ms": {
                 "type": "enum",
@@ -68,7 +68,37 @@ CUSTOM_FILTERS: dict[str, dict] = {
     },
 }
 
-GROUP_BY_OPTIONS = ("user", "taxonomy_label", "week", "sentiment")
+GROUP_BY_OPTIONS = ("user", "taxonomy_label", "day", "week", "month", "sentiment")
+
+# Fixed questions. trend takes one slot. The sentence itself is not a request field.
+TEMPLATES: dict[str, dict] = {
+    "trend": {"slot": "bucket", "values": ("day", "week", "month")},
+    "by_topic": {"group_by": "taxonomy_label"},
+    "by_sentiment": {"group_by": "sentiment"},
+}
+
+
+def resolve_template(template_id: str, slot: str | None) -> str:
+    spec = TEMPLATES.get(template_id)
+    if spec is None:
+        raise ValueError("unsupported template")
+    fixed = spec.get("group_by")
+    if fixed:
+        if slot:
+            raise ValueError("unsupported slot")
+        return str(fixed)
+    if slot not in spec["values"]:
+        raise ValueError("unsupported slot")
+    return str(slot)
+
+
+def default_selections() -> list[dict]:
+    """Every Analytics measure, with each parameter at its catalog default."""
+    selections = []
+    for option_id, spec in CATALOG.items():
+        params = {name: rule["default"] for name, rule in spec["params"].items()}
+        selections.append({"option_id": option_id, "params": params})
+    return selections
 
 
 def public_catalog() -> list[dict]:

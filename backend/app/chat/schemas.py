@@ -21,10 +21,16 @@ class GetAnalysisArgs(BaseModel):
     file_id: uuid.UUID
 
 
+class ProfileSpeakerArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: uuid.UUID | None = None
+
+
 class RunSummaryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    group_by: Literal["user", "taxonomy_label", "week", "sentiment"]
+    group_by: Literal["user", "taxonomy_label", "day", "week", "month", "sentiment"]
     time_from: datetime | None = None
     time_to: datetime | None = None
 

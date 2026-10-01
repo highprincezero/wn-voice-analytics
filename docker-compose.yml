@@ -16,6 +16,8 @@ x-app-env: &app-env
   # Well-known Azurite (local storage emulator) dev key, not a real secret.
   AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
   AZURE_STORAGE_CONTAINER: voice
+  # Transcription calls this MCP server's fetch_audio tool to read the blob.
+  MCP_AUDIO_URL: http://azurite-mcp:8090/mcp
   AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
   AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
   AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-03-01-preview}
@@ -74,6 +76,31 @@ services:
     volumes:
       - azurite:/data
 
+  # FastAPI app. MCP tools list_audio and fetch_audio read the Azurite voice container.
+  azurite-mcp:
+    build:
+      context: ./mcp
+    environment:
+      AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
+      AZURE_STORAGE_CONTAINER: voice
+    ports:
+      - "8090:8090"
+    depends_on:
+      azurite:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
   api:
     # build.context: directory sent to Docker to build the image (uses backend/Dockerfile).
     build:
@@ -92,6 +119,8 @@ services:
         condition: service_healthy
       azurite:
         condition: service_started
+      azurite-mcp:
+        condition: service_healthy
     # API is healthy once /api/v1/health responds; worker and web wait on this.
     healthcheck:
       test:
@@ -243,7 +272,7 @@ services:
       NEXTAUTH_URL: http://localhost:3000
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-nextauth-secret-change-me}
       LANGFUSE_INIT_ORG_ID: voice-org
-      LANGFUSE_INIT_ORG_NAME: Voice Analytics
+      LANGFUSE_INIT_ORG_NAME: Audio Analytics
       LANGFUSE_INIT_PROJECT_ID: voice-analytics
       LANGFUSE_INIT_PROJECT_NAME: voice-analytics
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev}

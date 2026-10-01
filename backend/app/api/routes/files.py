@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime
@@ -125,8 +126,8 @@ async def upload_files(
         append_event(db, audio, "File uploaded and saved to blob storage", stage="upload")
         append_event(db, audio, "Row inserted in Postgres", stage="upload")
         db.commit()
-        # Hand off to inline run / Celery / Service Bus (see analysis/service.py).
-        enqueue_analysis(file_id, user.id)
+        # The runner starts its own loop, so inline mode cannot run on this one.
+        await asyncio.to_thread(enqueue_analysis, file_id, user.id)
         db.refresh(audio)
         analysis = (
             db.query(Analysis)

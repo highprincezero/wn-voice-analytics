@@ -1,18 +1,19 @@
 from typing import TypedDict
 
-# StateGraph builds the pipeline as a graph of nodes; END is the built-in terminal node.
-from langgraph.graph import END, StateGraph
+from agent_framework import WorkflowBuilder
 
 from app.analysis.audio_features import measure_duration
 from app.analysis.chunking import chunk_text
 from app.analysis.layer2 import run_layer2
+from app.analysis.mcp_audio import fetch_audio_via_mcp
 from app.analysis.progress import current_tracker
-from app.analysis.providers.factory import get_intelligence
+from app.analysis.providers.intelligence import get_intelligence
 from app.analysis.schemas import validate_layer1, validate_layer2
 from app.analysis.taxonomy import union_taxonomy
 from app.analysis.tracing import analysis_span
 from app.config import get_settings
 from app.guardrails.safety import get_safety
+from app.workflow import Emit, Finish, Step, run_workflow
 
 
 # Shared state passed between every node. TypedDict gives it typed keys;
@@ -20,6 +21,7 @@ from app.guardrails.safety import get_safety
 class AnalysisState(TypedDict, total=False):
     filename: str
     audio_bytes: bytes
+    storage_key: str
     options: list
     duration_sec: float
     wav_ok: bool
@@ -52,12 +54,12 @@ def _note(message: str, *, stage: str | None = None) -> None:
         tracker.note(message, stage=stage)
 
 
-# Node: every node takes the current state and returns the updated state;
-# LangGraph merges the returned keys into the shared state before the next node runs.
+# Each node takes the current state and returns it. The next node receives that dict.
 def _prepare(state: AnalysisState) -> AnalysisState:
     # Records this step as a child span in the trace (timing + errors).
     with analysis_span("prepare"):
         try:
+            # Measured from the decoded samples (wav, mp3, m4a, ogg, flac), never the LLM.
             state["duration_sec"] = round(measure_duration(state["audio_bytes"]), 3)
             state["wav_ok"] = True
         except ValueError:
@@ -70,12 +72,25 @@ def _prepare(state: AnalysisState) -> AnalysisState:
     return state
 
 
+def _audio_for_transcription(state: AnalysisState) -> bytes:
+    """Load the clip through MCP when a server URL and blob key are configured."""
+    settings = get_settings()
+    key = state.get("storage_key") or ""
+    if settings.mcp_audio_url and key:
+        _note(f"MCP tool fetch_audio {key}", stage="transcribe")
+        audio = fetch_audio_via_mcp(settings.mcp_audio_url, key)
+        state["audio_bytes"] = audio
+        return audio
+    return state["audio_bytes"]
+
+
 def _transcribe(state: AnalysisState) -> AnalysisState:
     _begin("transcribe", "Transcribe started")
     with analysis_span("transcribe"):
+        audio = _audio_for_transcription(state)
         # Provider (real or mock) is chosen by config; returns the transcript text.
         state["transcript"] = get_intelligence().transcribe(
-            state["audio_bytes"], state.get("filename") or "audio.wav"
+            audio, state.get("filename") or "audio.wav"
         )
     _finish("transcribe", "Transcribe finished")
     return state
@@ -90,19 +105,22 @@ def _shield(state: AnalysisState) -> AnalysisState:
         state["block_reason"] = result.reason
     _finish("safety", "Safety check finished")
     if state.get("blocked"):
-        _note("Layer 1 skipped because content safety blocked the transcript", stage="layer1")
-        _note("Layer 2 skipped because content safety blocked the transcript", stage="layer2")
+        _note("Insights skipped because content safety blocked the transcript", stage="layer1")
+        _note("Analytics skipped because content safety blocked the transcript", stage="layer2")
     return state
 
 
-# Routing function for add_conditional_edges: reads the state and returns a label
-# ('stop' or 'go') that is mapped to the next node in build_graph().
-def _route_after_shield(state: AnalysisState) -> str:
-    return "stop" if state.get("blocked") else "go"
+# After safety, exactly one of these edges runs.
+def _allowed(state: dict) -> bool:
+    return not state.get("blocked")
+
+
+def _blocked(state: dict) -> bool:
+    return bool(state.get("blocked"))
 
 
 def _layer1(state: AnalysisState) -> AnalysisState:
-    _begin("layer1", "Layer 1 started")
+    _begin("layer1", "Insights started")
     with analysis_span("layer1"):
         provider = get_intelligence()
         settings = get_settings()
@@ -125,14 +143,14 @@ def _layer1(state: AnalysisState) -> AnalysisState:
         state["taxonomy"] = result["taxonomy"]
         state["summary_strategy"] = strategy
         state["chunk_count"] = chunk_count
-    _finish("layer1", "Layer 1 finished")
+    _finish("layer1", "Insights finished")
     return state
 
 
 def _layer2(state: AnalysisState) -> AnalysisState:
-    _begin("layer2", "Layer 2 started")
+    _begin("layer2", "Analytics started")
     with analysis_span("layer2"):
-        # Layer 2: extra analytics (audio + text features) selected via the request options.
+        # Analytics: optional measures (audio and text) selected from the saved options.
         state["layer2"] = run_layer2(
             audio=state["audio_bytes"],
             transcript=state.get("transcript") or "",
@@ -140,7 +158,7 @@ def _layer2(state: AnalysisState) -> AnalysisState:
             options=state.get("options") or [],
             wav_ok=bool(state.get("wav_ok")),
         )
-    _finish("layer2", "Layer 2 finished")
+    _finish("layer2", "Analytics finished")
     return state
 
 
@@ -157,44 +175,43 @@ def _validate(state: AnalysisState) -> AnalysisState:
         state["summary"] = validated["summary"]
         state["taxonomy"] = validated["taxonomy"]
         state["layer2"] = validate_layer2(state.get("layer2") or {})
-    _note("Validated summary and Layer 2 output", stage="layer2")
+    _note("Validated summary and Analytics output", stage="layer2")
     return state
 
 
-# Wires the nodes together and compiles them into a runnable graph.
+# A new workflow each recording. The framework keeps run state on the instance.
 def build_graph():
-    # StateGraph(AnalysisState): the state schema every node reads from and writes to.
-    graph = StateGraph(AnalysisState)
-    # add_node(name, fn): registers a step; the name is what edges refer to.
-    graph.add_node("prepare", _prepare)
-    graph.add_node("transcribe", _transcribe)
-    graph.add_node("shield", _shield)
-    graph.add_node("layer1", _layer1)
-    graph.add_node("layer2", _layer2)
-    graph.add_node("validate", _validate)
-    # set_entry_point: the first node to run (same as add_edge(START, "prepare")).
-    graph.set_entry_point("prepare")
-    # add_edge(a, b): fixed transition, b always runs after a.
-    graph.add_edge("prepare", "transcribe")
-    graph.add_edge("transcribe", "shield")
-    # add_conditional_edges: after 'shield', call _route_after_shield(state) and
-    # use its return value as a key into the map: 'stop' ends the run, 'go' continues.
-    graph.add_conditional_edges("shield", _route_after_shield, {"stop": END, "go": "layer1"})
-    graph.add_edge("layer1", "layer2")
-    graph.add_edge("layer2", "validate")
-    # END: finishing here makes invoke() return the final state.
-    graph.add_edge("validate", END)
-    # compile() validates the wiring and returns a runnable graph with .invoke()/.stream().
-    return graph.compile()
+    prepare = Step("prepare", _prepare)
+    transcribe = Step("transcribe", _transcribe)
+    shield = Step("shield", _shield)
+    layer1 = Step("layer1", _layer1)
+    layer2 = Step("layer2", _layer2)
+    validate = Finish("validate", _validate)
+    stop = Emit("stop")
+    return (
+        WorkflowBuilder(start_executor=prepare, name="analysis")
+        .add_edge(prepare, transcribe)
+        .add_edge(transcribe, shield)
+        .add_edge(shield, layer1, condition=_allowed)
+        .add_edge(shield, stop, condition=_blocked)
+        .add_edge(layer1, layer2)
+        .add_edge(layer2, validate)
+        .build()
+    )
 
 
-# Compiled graph is cached at module level so it is only built once per process.
-_compiled = None
-
-
-def run_graph(audio_bytes: bytes, filename: str, options: list[dict]) -> dict:
-    global _compiled
-    if _compiled is None:
-        _compiled = build_graph()
-    # invoke(initial_state) runs the graph synchronously and returns the final state dict.
-    return _compiled.invoke({"audio_bytes": audio_bytes, "filename": filename, "options": options})
+def run_graph(
+    audio_bytes: bytes,
+    filename: str,
+    options: list[dict],
+    storage_key: str = "",
+) -> dict:
+    return run_workflow(
+        build_graph(),
+        {
+            "audio_bytes": audio_bytes,
+            "filename": filename,
+            "options": options,
+            "storage_key": storage_key,
+        },
+    )

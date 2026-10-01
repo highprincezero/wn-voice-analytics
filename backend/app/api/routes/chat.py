@@ -1,9 +1,12 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.chat.agent import run_chat_agent
+from app.chat.memory import latest_session, open_session, prepare_history, save_exchange, thread
 from app.db.models import User
 from app.db.session import get_db
 from app.guardrails.safety import get_safety
@@ -29,6 +32,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     # Caps conversation history at 8 turns to bound prompt size.
     history: list[ChatTurn] = Field(default_factory=list, max_length=8)
+    # Absent on the first turn. The same id keeps later turns in one session.
+    session_id: uuid.UUID | None = None
 
 
 # Content-safety screen for user text before it reaches the LLM.
@@ -56,6 +61,32 @@ def chat(
                 _screen(turn["content"])
     except GuardrailError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Runs the tool-calling agent (see chat/agent.py) and returns its answer.
-    outcome = run_chat_agent(db, user.id, message, history)
+    session = open_session(db, user.id, body.session_id)
+    # Stored turns win. Browser turns are copied in only while the session is empty.
+    stored = prepare_history(db, user.id, session.id, history)
+    outcome = run_chat_agent(db, user.id, message, stored)
+    save_exchange(db, user.id, session.id, message, outcome.get("reply") or "")
+    db.commit()
+    outcome["session_id"] = str(session.id)
     return outcome
+
+
+@router.get("/session")
+def chat_session(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    row = latest_session(db, user.id)
+    if row is None:
+        return {"session_id": None, "messages": []}
+    return {"session_id": str(row.id), "messages": thread(db, user.id, row.id)}
+
+
+@router.post("/session")
+def start_chat_session(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    row = open_session(db, user.id, None)
+    db.commit()
+    return {"session_id": str(row.id), "messages": []}

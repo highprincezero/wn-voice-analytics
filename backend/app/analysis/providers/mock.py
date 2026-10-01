@@ -72,6 +72,13 @@ class MockIntelligence:
         record_generation("layer1-reduce", "mock", messages, result)
         return result
 
+    def speaker_profile(self, audio: bytes, filename: str) -> dict:
+        from app.analysis.speaker_skill import acoustic_profile
+
+        result = acoustic_profile(audio, filename)
+        record_generation("speaker-profile", "mock", [], result)
+        return result
+
     def rollup_summary(self, summaries: list[str]) -> str:
         messages = build_rollup_messages(summaries)
         cleaned: list[str] = []

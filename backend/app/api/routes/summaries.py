@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.models import RollupSummary, User
 from app.db.session import get_db
+from app.guardrails.catalog import resolve_template
 from app.jobs.summary_job import run_rollup
 from app.schemas.api import RollupRequest
 
@@ -29,7 +30,10 @@ def create_summary(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        row = run_rollup(db, user.id, body.group_by, body.time_from, body.time_to, "on_demand")
+        group_by = body.group_by
+        if body.template_id:
+            group_by = resolve_template(body.template_id, body.slot)
+        row = run_rollup(db, user.id, group_by, body.time_from, body.time_to, "on_demand")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _item(row)

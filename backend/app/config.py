@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     azure_storage_connection_string: str = ""
     azure_storage_container: str = "voice"
+    # When set, transcription loads the audio with the Azurite MCP fetch_audio tool.
+    mcp_audio_url: str = ""
 
     azure_openai_endpoint: str = ""
     azure_openai_api_key: str = ""

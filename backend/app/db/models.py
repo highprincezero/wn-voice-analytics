@@ -141,7 +141,7 @@ class RollupSummary(Base):
     __tablename__ = "rollup_summaries"
     __table_args__ = (
         CheckConstraint(
-            "group_by IN ('user', 'taxonomy_label', 'week', 'sentiment')",
+            "group_by IN ('user', 'taxonomy_label', 'day', 'week', 'month', 'sentiment')",
             name="rollup_summaries_group_chk",
         ),
         CheckConstraint(
@@ -190,4 +190,42 @@ class FileEvent(Base):
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     level: Mapped[str] = mapped_column(String(16), default="info")
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
+
+
+# One chat for this account. Hash-partitioned by user_id, same as the other tenant tables.
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
+
+
+# Questions and answers for one chat. seq is the order inside the session.
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "session_id"],
+            ["chat_sessions.user_id", "chat_sessions.id"],
+            ondelete="CASCADE",
+            name="chat_messages_session_fk",
+        ),
+        CheckConstraint(
+            "role IN ('user', 'assistant')",
+            name="chat_messages_role_chk",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True))
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    seq: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)

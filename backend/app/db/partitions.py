@@ -14,6 +14,8 @@ USER_SCOPED_TABLES = (
     "prompt_configs",
     "rollup_summaries",
     "file_events",
+    "chat_sessions",
+    "chat_messages",
 )
 
 

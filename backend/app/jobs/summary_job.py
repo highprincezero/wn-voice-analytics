@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.analysis.map_reduce import map_reduce_summaries
-from app.analysis.providers.factory import get_intelligence
+from app.analysis.providers.intelligence import get_intelligence
+from app.analysis.summarize_group import summarize_group
 from app.config import get_settings
 from app.db.models import Analysis, RollupSummary
 from app.db.session import SessionLocal
@@ -31,10 +31,20 @@ def _groups(rows: list[Analysis], group_by: str) -> dict[str, list[str]]:
             for label in labels:
                 groups.setdefault(str(label), []).append(row.summary or "")
         return groups
+    if group_by == "day":
+        for row in rows:
+            key = row.created_at.strftime("%Y-%m-%d")
+            groups.setdefault(key, []).append(row.summary or "")
+        return groups
     if group_by == "week":
         for row in rows:
             iso = row.created_at.isocalendar()
             key = f"{iso.year}-W{iso.week:02d}"
+            groups.setdefault(key, []).append(row.summary or "")
+        return groups
+    if group_by == "month":
+        for row in rows:
+            key = row.created_at.strftime("%Y-%m")
             groups.setdefault(key, []).append(row.summary or "")
         return groups
     if group_by == "sentiment":
@@ -74,10 +84,10 @@ def run_rollup(
             {
                 "key": key,
                 "file_count": len(summaries),
-                "summary": map_reduce_summaries(summaries, provider.rollup_summary),
+                "summary": summarize_group(summaries, provider.rollup_summary),
             }
         )
-    overall = map_reduce_summaries([item["summary"] for item in built], provider.rollup_summary)
+    overall = summarize_group([item["summary"] for item in built], provider.rollup_summary)
     result = {
         "group_by": group_by,
         "time_from": time_from.isoformat() if time_from else None,

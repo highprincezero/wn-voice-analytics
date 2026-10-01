@@ -7,6 +7,7 @@ from app.analysis.progress import append_event, mark_queued, pause_for_demo, tra
 from app.config import get_settings
 from app.db.models import Analysis, AudioFile, PromptConfig, Transcript
 from app.db.session import SessionLocal
+from app.guardrails.catalog import default_selections
 from app.guardrails.validate import validate_selections
 from app.storage.blob import get_blob_store
 from app.storage.keys import analysis_key, transcript_key
@@ -73,12 +74,16 @@ def run_file_analysis(file_id: str, user_id: str, task_id: str | None = None) ->
                 payload = get_blob_store().download(audio.storage_key)
                 config = db.query(PromptConfig).filter(PromptConfig.user_id == uid).one_or_none()
                 raw_options = list(config.selections) if config is not None else []
-                options = validate_selections(raw_options) if raw_options else []
-                # Runs the LangGraph pipeline and returns the final state dict.
+                if raw_options:
+                    options = validate_selections(raw_options)
+                else:
+                    options = default_selections()
+                # Runs the workflow and returns the final state dict.
                 state = run_graph(
                     audio_bytes=payload,
                     filename=audio.original_filename,
                     options=options,
+                    storage_key=audio.storage_key,
                 )
                 _persist(db, audio, state, tracker)
                 db.commit()

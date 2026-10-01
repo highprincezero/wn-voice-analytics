@@ -1,1 +1,1 @@
-"""Voice analytics API."""
+"""Audio analytics API."""
