@@ -75,7 +75,9 @@ resource "azurerm_storage_container" "voice" {
   container_access_type = "private"
 }
 
-# Standard is not zone redundant. Premium would be, and is not used here.
+# Azure creates a new Standard cache zone redundant (automatic zone allocation) in regions
+# with availability zones. Azure Cache for Redis retires on 2028-09-30, and a tenant that
+# had no cache before 2026-04-01 cannot create one; such a tenant needs Azure Managed Redis.
 resource "azurerm_redis_cache" "this" {
   name                 = "redis-${var.name_prefix}-${var.region_name}"
   location             = azurerm_resource_group.this.location

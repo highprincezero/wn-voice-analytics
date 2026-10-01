@@ -1,5 +1,6 @@
 # Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
-# Standard is not zone redundant. Premium would be, and is not used here.
+# Every Service Bus tier is zone redundant in regions with availability zones; Azure
+# turns it on with no setting. Premium adds private networking and geo-replication.
 resource "azurerm_servicebus_namespace" "this" {
   name                = "sb-${var.name_prefix}-${var.region_name}"
   location            = azurerm_resource_group.this.location

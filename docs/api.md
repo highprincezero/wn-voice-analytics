@@ -19,7 +19,10 @@ API means application programming interface.
 | 400 | the request was rejected |
 | 404 | missing, including another account's file |
 | 409 | that email already exists |
+| 413 | the file is over 20 MB |
+| 422 | the body or a query value has the wrong shape, or an extra field where one is not allowed |
 | 429 | over 120 calls in one minute |
+| 503 | the rate limiter (Redis) cannot be reached, so the call is refused |
 | GET, POST, PUT, DELETE | the HTTP methods listed on each route |
 
 Authenticated routes send `Authorization: Bearer <token>`. Errors look like `{"detail": "..."}`.
@@ -74,7 +77,7 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/reports` | yes | The latest reports, up to 20 |
 | GET | `/reports/{id}` | yes | One report: `queued`, `running`, `completed`, or `failed` |
 | POST | `/chat` | yes | One question. Saves the turn on this account |
-| GET | `/chat/session` | yes | The latest chat and its saved turns |
+| GET | `/chat/session` | yes | The latest chat and its last 40 saved messages |
 | POST | `/chat/session` | yes | Start an empty chat |
 | GET | `/health` | no | Liveness |
 | GET | `/health/ready` | no | Database check |
@@ -111,14 +114,16 @@ flowchart LR
 
 | Filter | |
 | --- | --- |
-| `date_from` `date_to` | Optional |
+| `date_from` `date_to` | Optional. Upload time |
 | `min_duration` `max_duration` | Optional |
 | `taxonomy` | Optional |
 | `custom` | `name:value` |
-| `limit` | Default 50 |
+| `limit` | Default 50, at most 200 |
 | `offset` | Optional |
 
 ## Summaries `group_by`
+
+`POST /summaries` takes JSON `group_by` (default `user`), optional `time_from` and `time_to`, or a fixed question instead of `group_by`: `template_id` `by_topic`, `by_sentiment`, or `trend` with `slot` `day`, `week`, or `month`. Anything else is 400. It runs in the API and answers 201 with the stored summary.
 
 | `group_by` | |
 | --- | --- |

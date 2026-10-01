@@ -41,6 +41,7 @@ terraform plan
 | Anonymous limit | API Management keys it on `X-Azure-ClientIP` from Front Door, or the caller IP when the header is missing |
 | Langfuse | Not configured. No Langfuse keys are set |
 | Front Door | Any healthy region. It does not route by `home_region`, so the other region answers 401 |
+| Redis | Azure Cache for Redis Standard, the rate-limit counter. Known limit: it retires on 2028-09-30, and since 2026-04-01 a tenant that had no Azure Cache for Redis before that date cannot create one, so the apply fails there. Moving to Azure Managed Redis is a Terraform change |
 
 ```mermaid
 flowchart LR

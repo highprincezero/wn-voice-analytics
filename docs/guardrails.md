@@ -164,7 +164,7 @@ The system text is a constant. The question is placed in the user message inside
 
 The agent may execute only `search_files`, `get_analysis`, `run_summary`, and `profile_speaker`. Any other name returns `unknown_tool` and is not called. Arguments are parsed with Pydantic models that forbid extra fields, so a model cannot pass `user_id`. Each query adds the JWT subject's `user_id`. A foreign file id is `not_found`.
 
-`get_analysis` returns the summary, taxonomy, Layer 2 object, and at most the first 1200 characters of the stored transcript. That excerpt reaches the model only inside `<tool_result>`, which the system text marks as data.
+`get_analysis` returns the summary (trimmed to 400 characters), taxonomy, Layer 2 object, and at most the first 1200 characters of the stored transcript. That excerpt reaches the model only inside `<tool_result>`, which the system text marks as data. To keep the prompt small, `search_files` returns at most 20 recordings, `run_summary` at most 8 groups (300 characters each, overall summary 800), each earlier turn sent to the planner is cut to 500 characters, and the tool result and context are each cut to 12,000 characters of JSON.
 
 Blocked transcripts never reach the chat model. For a file whose safety status is `blocked`, every chat tool (`get_analysis`, `search_files`, and `profile_speaker`) returns metadata only: id, filename, `status: blocked`, duration, upload time, the stored block reason, and the note "This recording was blocked by the content safety check." No transcript text, summary, taxonomy, or Layer 2 object is returned, and `profile_speaker` does not send the blocked audio to the model.
 
@@ -178,6 +178,7 @@ Azure mode asks for a JSON object whose only field is `reply`, then validates it
 - Category lists in the mock are short on purpose. They are not a content policy.
 - Schema validation checks shape, not factual accuracy. A model can still omit a topic. The union step only preserves topics the chunk step already returned.
 - Blocked transcripts are stored because the user uploaded them. No summary or Analytics is produced for them, and they never reach the chat model. A retention policy for blocked text is future work.
+- Analytics reads only the first 24,000 characters of a transcript, and Insights at most 20 chunks of up to 4,000 characters (`MAX_CHUNKS`, `CHUNK_CHARS`). Text past those points is not analyzed. The Analytics limit is a code constant, so raising it needs a code change.
 - In Azure mode the safety check reads only the first 10,000 characters of a text. A transcript longer than that is screened in part. Screening the rest needs a code change, for example one check per chunk.
 - The safety check reads the transcript, not the audio. This design does not scan audio for non-speech signals such as hidden ultrasonic content. Duration and RMS are the acoustic checks in this POC.
 - Speaker profiles are estimates from the audio, not identity facts.

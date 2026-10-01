@@ -36,7 +36,7 @@ Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, wh
 | AudioLayer1 | layer1 | Insights for one short recording: summary and topics. The model column shows gpt-5-mini. |
 | AudioChunk | layer1-map | One piece of a long transcript. |
 | AudioReduce | layer1-reduce | Joins those pieces into one Insights result. |
-| AudioRollup | rollup | One summary for a group of recordings. The scheduled summaries and the All groupings report run in the worker. On-demand summaries run in the API. |
+| AudioRollup | rollup | One summary for a group of recordings. The All groupings report runs in the worker. Scheduled summaries run in the Celery worker locally and in the summary job in Azure. On-demand summaries run in the API. |
 | AudioLayer2Prompts | layer2-prompts | Analytics for one recording: the ticked predefined prompts, with the measure_rms and measure_speaking_pace tool round trip. |
 | speaker-profile | speaker-profile | Speaker profile for one recording, written after that model call succeeds. It runs in the API, from the chat `profile_speaker` tool. |
 
