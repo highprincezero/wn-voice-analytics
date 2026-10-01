@@ -133,6 +133,8 @@ The agent may execute only `search_files`, `get_analysis`, `run_summary`, and `p
 
 `get_analysis` returns the summary, taxonomy, Layer 2 object, and at most the first 1200 characters of the stored transcript. That excerpt reaches the model only inside `<tool_result>`, which the system text marks as data.
 
+Blocked transcripts never reach the chat model. For a file whose safety status is `blocked`, every chat tool (`get_analysis`, `search_files`, and `profile_speaker`) returns metadata only: id, filename, `status: blocked`, duration, upload time, the stored block reason, and the note "This recording was blocked by the content safety check." No transcript text, summary, taxonomy, or Layer 2 object is returned, and `profile_speaker` does not send the blocked audio to the model.
+
 Azure mode asks for a JSON object whose only field is `reply`, then validates it again. Extra fields fail that check, and the API uses the rule-based reply instead of the model text. Mock mode never calls the chat deployment. It still runs the tool step, so the tests exercise the same whitelist and the same user filter.
 
 `GET /api/v1/events` uses the same JWT filter. A caller cannot read another user's pipeline log, and the messages do not include transcript text.
@@ -142,6 +144,6 @@ Azure mode asks for a JSON object whose only field is `reply`, then validates it
 - The mock safety provider is a stand-in for Azure AI Content Safety. It is deterministic and good enough for tests and the offline demo. Production must set `SAFETY_PROVIDER=azure`.
 - Category lists in the mock are short on purpose. They are not a content policy.
 - Schema validation checks shape, not factual accuracy. A model can still omit a topic. The union step only preserves topics the chunk step already returned.
-- Blocked transcripts are stored because the user uploaded them. No summary or Analytics is produced for them. A retention policy for blocked text is future work.
+- Blocked transcripts are stored because the user uploaded them. No summary or Analytics is produced for them, and they never reach the chat model. A retention policy for blocked text is future work.
 - The safety check reads the transcript, not the audio. This design does not scan audio for non-speech signals such as hidden ultrasonic content. Duration and RMS are the acoustic checks in this POC.
 - Speaker profiles are estimates from the audio, not identity facts.

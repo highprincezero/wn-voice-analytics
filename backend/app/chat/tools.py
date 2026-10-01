@@ -154,7 +154,31 @@ def _taxonomy_matches(taxonomy: dict | None, needle: str) -> bool:
     return False
 
 
+BLOCKED_NOTE = "This recording was blocked by the content safety check."
+
+
+def _is_blocked(audio: AudioFile, analysis: Analysis | None) -> bool:
+    return audio.status == "blocked" or (analysis is not None and analysis.status == "blocked")
+
+
+def _blocked_payload(audio: AudioFile, analysis: Analysis | None) -> dict:
+    """Metadata only. A blocked file's transcript and analysis never reach the model."""
+    return {
+        "id": str(audio.id),
+        "filename": audio.original_filename,
+        "status": "blocked",
+        "duration_sec": audio.duration_sec,
+        "created_at": audio.created_at.isoformat(timespec="seconds")
+        if audio.created_at is not None
+        else None,
+        "block_reason": None if analysis is None else analysis.block_reason,
+        "note": BLOCKED_NOTE,
+    }
+
+
 def _file_payload(audio: AudioFile, analysis: Analysis | None) -> dict:
+    if _is_blocked(audio, analysis):
+        return _blocked_payload(audio, analysis)
     taxonomy = None if analysis is None else analysis.taxonomy
     return {
         "id": str(audio.id),
@@ -231,6 +255,8 @@ def get_analysis(db: Session, user_id: uuid.UUID, args: GetAnalysisArgs) -> dict
         .one_or_none()
     )
     result = _file_payload(audio, analysis)
+    if _is_blocked(audio, analysis):
+        return result
     if transcript is not None and transcript.text:
         result["transcript"] = _clip(transcript.text, 1200)
     return result
@@ -333,6 +359,16 @@ def profile_speaker(db: Session, user_id: uuid.UUID, args: ProfileSpeakerArgs) -
     audio = query.order_by(AudioFile.created_at.desc()).first()
     if audio is None:
         return {"error": "not_found"}
+    analysis = (
+        db.query(Analysis)
+        .filter(Analysis.user_id == user_id, Analysis.file_id == audio.id)
+        .one_or_none()
+    )
+    if _is_blocked(audio, analysis):
+        # The audio carries the same content the safety check blocked. Do not send it.
+        blocked = _blocked_payload(audio, analysis)
+        blocked["file_id"] = blocked.pop("id")
+        return blocked
     try:
         data = get_blob_store().download(audio.storage_key)
     except FileNotFoundError:

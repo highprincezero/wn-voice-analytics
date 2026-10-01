@@ -479,6 +479,8 @@ def compose_with_rules(intent: str, tool_result: dict) -> str:
         return "That filter was rejected by content safety."
     if tool_result.get("error"):
         return _CANT_DETERMINE
+    if tool_result.get("status") == "blocked" and tool_result.get("note"):
+        return f"{tool_result.get('filename') or 'recording'}: {tool_result['note']}"
     if intent == "profile":
         voices = tool_result.get("voices") or []
         filename = tool_result.get("filename") or "recording"
