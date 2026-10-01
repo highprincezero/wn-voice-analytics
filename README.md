@@ -123,7 +123,7 @@ ruff check backend frontend
 cd backend && pytest
 ```
 
-Local tests need Python 3.12, the same version CI and the api image use. They do not need Docker. The partition check runs when `POSTGRES_TEST_URL` is set. CI sets it.
+Local tests need Python 3.12, the same version CI and the api image use, and `ffmpeg` on the PATH for the mp3 tests. They do not need Docker. The partition check runs when `POSTGRES_TEST_URL` is set. CI sets it.
 
 To run the same tests inside the api image (it has no pytest or ruff, so the dev requirements are installed into the throwaway container first):
 
