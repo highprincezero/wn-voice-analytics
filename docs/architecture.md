@@ -198,7 +198,7 @@ users, and settings." }
 [langfuse:db-init]"]
 ```
 
-## One recording
+## One recording (MAF analysis workflow)
 
 One saved file is measured, transcribed, checked, summarized, then run through the ticked Analytics prompts on gpt-5-mini. Loudness and pace numbers come from measuring tools.
 
@@ -228,7 +228,7 @@ Tools measure_rms() and measure_speaking_pace() give the loudness and pace numbe
   analytics --> saved["Saved"]
 ```
 
-## One question
+## One question (MAF chat workflow)
 
 | | Azure | Mock |
 | --- | --- | --- |
