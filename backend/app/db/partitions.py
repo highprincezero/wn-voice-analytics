@@ -13,6 +13,7 @@ USER_SCOPED_TABLES = (
     "analyses",
     "prompt_configs",
     "rollup_summaries",
+    "group_reports",
     "file_events",
     "chat_sessions",
     "chat_messages",

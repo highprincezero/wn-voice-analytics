@@ -105,6 +105,16 @@ class ApiClient:
     def run_summary(self, body: dict) -> dict:
         return self._request("POST", "/api/v1/summaries", json=body).json()
 
+    def start_report(self, groupings: list[str] | None = None) -> dict:
+        body = {} if groupings is None else {"groupings": groupings}
+        return self._request("POST", "/api/v1/reports", json=body).json()
+
+    def get_report(self, report_id: str) -> dict:
+        return self._request("GET", f"/api/v1/reports/{report_id}").json()
+
+    def list_reports(self) -> dict:
+        return self._request("GET", "/api/v1/reports").json()
+
     def list_summaries(self) -> dict:
         return self._request("GET", "/api/v1/summaries").json()
 

@@ -41,6 +41,15 @@ def dispatch(message: dict, queue: str | None = None) -> None:
         finally:
             db.close()
         return
+    if kind == "group_report":
+        from app.jobs.report_job import run_group_report
+
+        report_id = message.get("report_id")
+        user_id = message.get("user_id")
+        if not report_id or not user_id:
+            raise ValueError("report_id and user_id are required")
+        run_group_report(str(report_id), str(user_id))
+        return
     if kind == "scheduled_rollup":
         scheduled_rollup_all_users()
         return

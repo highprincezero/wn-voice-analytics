@@ -170,6 +170,39 @@ CREATE TABLE IF NOT EXISTS rollup_summaries_p13 PARTITION OF rollup_summaries FO
 CREATE TABLE IF NOT EXISTS rollup_summaries_p14 PARTITION OF rollup_summaries FOR VALUES WITH (MODULUS 16, REMAINDER 14);
 CREATE TABLE IF NOT EXISTS rollup_summaries_p15 PARTITION OF rollup_summaries FOR VALUES WITH (MODULUS 16, REMAINDER 15);
 
+CREATE TABLE IF NOT EXISTS group_reports (
+    user_id UUID NOT NULL,
+    id UUID NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    groupings JSONB NOT NULL,
+    time_from TIMESTAMP,
+    time_to TIMESTAMP,
+    result JSONB,
+    error_message TEXT,
+    created_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    PRIMARY KEY (user_id, id),
+    CONSTRAINT group_reports_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT group_reports_status_chk CHECK (status IN ('queued', 'running', 'completed', 'failed'))
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE IF NOT EXISTS group_reports_p0 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE IF NOT EXISTS group_reports_p1 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+CREATE TABLE IF NOT EXISTS group_reports_p2 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 2);
+CREATE TABLE IF NOT EXISTS group_reports_p3 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 3);
+CREATE TABLE IF NOT EXISTS group_reports_p4 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 4);
+CREATE TABLE IF NOT EXISTS group_reports_p5 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 5);
+CREATE TABLE IF NOT EXISTS group_reports_p6 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 6);
+CREATE TABLE IF NOT EXISTS group_reports_p7 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 7);
+CREATE TABLE IF NOT EXISTS group_reports_p8 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 8);
+CREATE TABLE IF NOT EXISTS group_reports_p9 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 9);
+CREATE TABLE IF NOT EXISTS group_reports_p10 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 10);
+CREATE TABLE IF NOT EXISTS group_reports_p11 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 11);
+CREATE TABLE IF NOT EXISTS group_reports_p12 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 12);
+CREATE TABLE IF NOT EXISTS group_reports_p13 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 13);
+CREATE TABLE IF NOT EXISTS group_reports_p14 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 14);
+CREATE TABLE IF NOT EXISTS group_reports_p15 PARTITION OF group_reports FOR VALUES WITH (MODULUS 16, REMAINDER 15);
+
 CREATE TABLE IF NOT EXISTS file_events (
     user_id UUID NOT NULL,
     id UUID NOT NULL,
@@ -267,6 +300,7 @@ CREATE INDEX IF NOT EXISTS file_events_user_seq_idx ON file_events (user_id, seq
 CREATE INDEX IF NOT EXISTS analyses_user_created_idx ON analyses (user_id, created_at);
 CREATE INDEX IF NOT EXISTS analyses_user_status_idx ON analyses (user_id, status);
 CREATE INDEX IF NOT EXISTS rollup_summaries_user_created_idx ON rollup_summaries (user_id, created_at);
+CREATE INDEX IF NOT EXISTS group_reports_user_created_idx ON group_reports (user_id, created_at);
 CREATE INDEX IF NOT EXISTS chat_sessions_user_created_idx ON chat_sessions (user_id, created_at);
 CREATE INDEX IF NOT EXISTS chat_messages_session_seq_idx ON chat_messages (user_id, session_id, seq);
 

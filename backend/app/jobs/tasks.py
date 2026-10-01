@@ -1,6 +1,7 @@
 from app.analysis.progress import record_job_note
 from app.analysis.service import run_file_analysis
 from app.jobs.celery_app import celery_app
+from app.jobs.report_job import run_group_report
 from app.jobs.summary_job import scheduled_rollup_all_users
 
 
@@ -37,3 +38,9 @@ def analyze_file_task(self, file_id: str, user_id: str) -> None:
 @celery_app.task(name="voice.scheduled_rollup")
 def scheduled_rollup_task() -> int:
     return scheduled_rollup_all_users()
+
+
+# All groupings report: one background job per request.
+@celery_app.task(name="voice.group_report")
+def group_report_task(report_id: str, user_id: str) -> None:
+    run_group_report(report_id, user_id)

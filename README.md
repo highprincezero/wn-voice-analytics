@@ -207,9 +207,24 @@ Base path `/api/v1`. Authenticated routes send `Authorization: Bearer <token>`. 
 | PUT | `/prompts/config` | yes | Save the chosen options |
 | POST | `/summaries` | yes | Group completed summaries |
 | GET | `/summaries` | yes | Recent summaries |
+| POST | `/reports` | yes | Start the All groupings report (background job) |
+| GET | `/reports` | yes | Recent reports |
+| GET | `/reports/{id}` | yes | One report and its status |
 | POST | `/chat` | yes | One question |
 | GET | `/health` | no | Liveness |
 | GET | `/meta` | no | Which providers are on |
+
+## Offline Collective Analysis
+
+Summarize across files offers one summary at a time (trend per day, week, or month, by topic, by sentiment) and the **All groupings report**, one background job that groups every completed file every way at once and stores the result. Files are grouped in code so groups are exact; the AI writes the summary for every group. The numbers per group (files, total and average length, average wpm, average loudness, sentiment and tone mix, action item count) are computed in code. Blocked files are never read and are counted as skipped. The single summaries also write an AI summary for every group, plus one overall.
+
+| Brief asks for | Where it is |
+| --- | --- |
+| Time range: day, week, month | `day` `week` `month` groupings |
+| Context summary | An AI summary for every group, from the fixed hardened rollup prompt (`gpt-5-mini`; mock in local mode and tests) over the files' Insights summaries |
+| User: all files together | `user` grouping, one group named `all files` |
+| Taxonomy label | `taxonomy_label`, one group per topic, personal topic, or upcoming event |
+| Other Layer 2 groupings | `sentiment`, `tone`, `pace_band` (slow under 110 wpm, conversational 110 to 170, brisk over 170), `key_entity`, `action_items` |
 
 ## Guardrails
 

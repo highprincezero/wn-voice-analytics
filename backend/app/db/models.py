@@ -162,6 +162,30 @@ class RollupSummary(Base):
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
 
 
+# One "All groupings" report: every grouping over the user's files, built by a background job.
+class GroupReport(Base):
+    __tablename__ = "group_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed')",
+            name="group_reports_status_chk",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    groupings: Mapped[list] = mapped_column(json_doc())
+    time_from: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    time_to: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    result: Mapped[dict | None] = mapped_column(json_doc(), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+
+
 # Append-only progress log per file (what the UI timeline shows).
 class FileEvent(Base):
     __tablename__ = "file_events"

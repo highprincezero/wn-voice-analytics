@@ -45,6 +45,16 @@ class PromptConfigResponse(BaseModel):
     selections: list[dict]
 
 
+class ReportRequest(BaseModel):
+    """All groupings report. Omit groupings for every grouping in the whitelist."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    groupings: list[str] | None = None
+    time_from: datetime | None = None
+    time_to: datetime | None = None
+
+
 class RollupRequest(BaseModel):
     group_by: str = "user"
     template_id: str | None = None

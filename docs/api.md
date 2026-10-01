@@ -43,6 +43,9 @@ Authenticated routes send `Authorization: Bearer <token>`. Errors look like `{"d
 | PUT | `/prompts/config` | yes | Replace that list |
 | POST | `/summaries` | yes | Group the completed summaries |
 | GET | `/summaries` | yes | The latest summaries, up to 50 |
+| POST | `/reports` | yes | Start the All groupings report. Returns 202 and the report row |
+| GET | `/reports` | yes | The latest reports, up to 20 |
+| GET | `/reports/{id}` | yes | One report: `queued`, `running`, `completed`, or `failed` |
 | POST | `/chat` | yes | One question. Saves the turn on this account |
 | GET | `/chat/session` | yes | The latest chat and its saved turns |
 | POST | `/chat/session` | yes | Start an empty chat |
@@ -96,3 +99,17 @@ flowchart LR
 | `taxonomy_label` | Topic |
 | `day` `week` `month` | Calendar bucket |
 | `sentiment` | Sentiment |
+
+## All groupings report
+
+Body: optional `groupings` (any of `day` `week` `month` `user` `taxonomy_label` `sentiment` `tone` `pace_band` `key_entity` `action_items`; all when left out), optional `time_from` and `time_to`. Unknown groupings are 400 and extra fields are 422.
+
+Files are grouped in code so groups are exact; the AI writes the summary for every group. Each group carries `key`, `file_count`, `total_duration_sec`, `avg_duration_sec`, `avg_words_per_minute`, `avg_rms_mean`, `sentiment_mix`, `tone_mix`, `action_item_count`, and `summary`. Only completed recordings are read; `blocked_skipped` counts the blocked ones.
+
+| Brief asks for | Where it is |
+| --- | --- |
+| Time range: day, week, month | `day` `week` `month` groupings |
+| Context summary | An AI summary for every group, from the fixed hardened rollup prompt (`gpt-5-mini`; mock in local mode and tests) over the files' Insights summaries |
+| User: all files together | `user` grouping, one group named `all files` |
+| Taxonomy label | `taxonomy_label`, one group per topic, personal topic, or upcoming event |
+| Other Layer 2 groupings | `sentiment`, `tone`, `pace_band` (slow under 110 wpm, conversational 110 to 170, brisk over 170), `key_entity`, `action_items` |

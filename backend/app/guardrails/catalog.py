@@ -111,6 +111,21 @@ CUSTOM_FILTERS: dict[str, dict] = {
 
 GROUP_BY_OPTIONS = ("user", "taxonomy_label", "day", "week", "month", "sentiment")
 
+# "All groupings" report. Files are bucketed in code; the AI writes every group's summary.
+# The last four come from Analytics (Layer 2) results.
+REPORT_GROUPINGS = (
+    "day",
+    "week",
+    "month",
+    "user",
+    "taxonomy_label",
+    "sentiment",
+    "tone",
+    "pace_band",
+    "key_entity",
+    "action_items",
+)
+
 # Fixed questions. trend takes one slot. The sentence itself is not a request field.
 TEMPLATES: dict[str, dict] = {
     "trend": {"slot": "bucket", "values": ("day", "week", "month")},

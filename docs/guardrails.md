@@ -111,6 +111,8 @@ Custom list filters use the same idea. `custom` must be `name:value`, and `name`
 
 Summaries `group_by` is `user`, `taxonomy_label`, `day`, `week`, `month`, or `sentiment`.
 
+The All groupings report (`POST /api/v1/reports`) takes only whitelisted `groupings` (`day` `week` `month` `user` `taxonomy_label` `sentiment` `tone` `pace_band` `key_entity` `action_items`); anything else is 400, and extra fields are 422. Files are grouped in code so groups are exact; the AI writes the summary for every group, with the fixed hardened rollup prompt and the summaries fenced in `<summaries>`. Only completed analyses are read, so blocked files never reach the report or the model.
+
 ### 2. Content safety on the way in
 
 Before a configuration is stored, the server serializes the cleaned options and runs content safety on that string. Azure mode calls Azure AI Content Safety `text:shieldPrompt` (Prompt Shields) and `text:analyze`. Mock mode, used locally and in tests, checks a fixed phrase list: jailbreak phrases such as "ignore previous instructions" and a small set of high-severity phrases. A hit returns HTTP 400 and nothing is saved.

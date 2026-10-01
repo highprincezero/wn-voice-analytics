@@ -5,6 +5,7 @@ import os
 import random
 import re
 import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -94,6 +95,7 @@ _TEMPLATES = (
     ("trend", "Show the trend per …"),
     ("by_topic", "Summarize by topic"),
     ("by_sentiment", "Summarize by sentiment"),
+    ("all_groupings", "All groupings report"),
 )
 _TEMPLATE_GROUP = {"by_topic": "taxonomy_label", "by_sentiment": "sentiment"}
 _BROWSE_COLUMNS = (
@@ -2898,6 +2900,110 @@ def _template_group(choice: str, slot: str) -> str:
     return _TEMPLATE_GROUP[choice]
 
 
+_REPORT_WAIT_SEC = 240
+
+
+def _report_rows(section: dict) -> list[dict]:
+    label = str(section.get("label") or "Group")
+    rows = []
+    for group in section.get("groups") or []:
+        mix = group.get("sentiment_mix") or {}
+        rows.append(
+            {
+                label: str(group.get("key") or ""),
+                "Files": int(group.get("file_count") or 0),
+                "Total min": round(float(group.get("total_duration_sec") or 0) / 60, 1),
+                "Avg wpm": group.get("avg_words_per_minute"),
+                "Avg RMS": group.get("avg_rms_mean"),
+                "Sentiment": ", ".join(f"{_nice(name)} {count}" for name, count in mix.items()),
+                "Summary": str(group.get("summary") or ""),
+            }
+        )
+    return rows
+
+
+def _render_report(report: dict) -> None:
+    """All groupings report: one section per grouping, a row and an AI summary per group."""
+    result = report.get("result") or {}
+    total = int(result.get("file_count") or 0)
+    if not total:
+        _empty("No completed recordings yet", "Upload a recording, then run the report again.")
+        return
+    sections = result.get("sections") or []
+    stats = [("Recordings", str(total)), ("Groupings", str(len(sections)))]
+    if result.get("blocked_skipped"):
+        stats.append(("Blocked, skipped", str(result["blocked_skipped"])))
+    _metrics("report", stats)
+    st.caption(
+        "Files are grouped in code so groups are exact; the AI writes the summary for every group."
+    )
+    for section in sections:
+        rows = _report_rows(section)
+        if not rows:
+            continue
+        label = str(section.get("label") or "Group")
+        _section(label)
+        _table(
+            rows,
+            {
+                label: st.column_config.TextColumn(label),
+                "Files": st.column_config.NumberColumn("Files", format="%d"),
+                "Avg wpm": st.column_config.NumberColumn("Avg wpm", format="%.0f"),
+                "Avg RMS": st.column_config.NumberColumn("Avg RMS", format="%.3f"),
+                "Summary": st.column_config.TextColumn("Summary", width="large"),
+            },
+        )
+
+
+def _wait_for_report(api: ApiClient) -> dict:
+    report = api.start_report()
+    deadline = time.monotonic() + _REPORT_WAIT_SEC
+    while report.get("status") in {"queued", "running"} and time.monotonic() < deadline:
+        time.sleep(1.5)
+        report = api.get_report(str(report["id"]))
+    return report
+
+
+def _report_panel(api: ApiClient) -> None:
+    st.caption(
+        "One background job groups every file by day, week, month, topic, sentiment, "
+        "tone, pace, key entity, and action items."
+    )
+    if st.button("Run", key="va-report-run", type="primary"):
+        try:
+            report = _await_progress(
+                "Building the all groupings report", lambda: _wait_for_report(api)
+            )
+        except ApiError as exc:
+            st.error(exc.detail)
+            return
+        st.session_state["assistant_report"] = report
+    report = st.session_state.get("assistant_report")
+    if report is None:
+        try:
+            items = api.list_reports().get("items") or []
+        except ApiError:
+            items = []
+        report = next((item for item in items if item.get("status") == "completed"), None)
+        if report is None:
+            return
+        st.caption("Latest report.")
+    status = str(report.get("status") or "")
+    if status in {"queued", "running"}:
+        st.info("The report is still being built in the background.")
+        if st.button("Refresh", key="va-report-refresh", type="tertiary"):
+            try:
+                st.session_state["assistant_report"] = api.get_report(str(report["id"]))
+            except ApiError as exc:
+                st.error(exc.detail)
+            st.rerun()
+        return
+    if status == "failed":
+        st.error(f"The report failed: {report.get('error_message') or 'unknown error'}")
+        return
+    _render_report(report)
+
+
 def _template_panel(api: ApiClient) -> None:
     """Summarize across files: one fixed question. Only the trend question takes a period."""
     labels = dict(_TEMPLATES)
@@ -2907,6 +3013,9 @@ def _template_panel(api: ApiClient) -> None:
         format_func=lambda item: labels[item],
         key="va-template-choice",
     )
+    if choice == "all_groupings":
+        _report_panel(api)
+        return
     slot = "month"
     if choice == "trend":
         slot = st.selectbox(
