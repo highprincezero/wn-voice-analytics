@@ -67,7 +67,7 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/files/{id}/audio` | yes | The audio bytes |
 | POST | `/files/{id}/analyze` | yes | Run it again |
 | DELETE | `/files/{id}` | yes | Delete the file and its rows |
-| GET | `/events` | yes | This account's processing log, newest first |
+| GET | `/events` | yes | This account's processing log, newest first. Up to 300 (`limit`), optional `file_id` |
 | GET | `/prompts/options` | no | The Analytics catalog |
 | GET | `/prompts/config` | yes | What this account turned on |
 | PUT | `/prompts/config` | yes | Replace that list |
@@ -100,6 +100,8 @@ flowchart LR
   processing --> blocked
   processing --> failed
 ```
+
+Run again sets the status back to uploaded, and each retry of a failed run sets processing again.
 
 | | |
 | --- | --- |

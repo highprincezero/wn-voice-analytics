@@ -18,7 +18,7 @@
 
 ## System
 
-This is the multi-region Azure design, kept in the repo with its Terraform. It is not a running deployment; the prototype runs on one machine with `docker compose up` (see [This machine](#this-machine)). In the design, a signed-in request enters through Front Door. The API answers a question, queues an upload, or writes the grouped summaries. Only the API sits behind Front Door. The Streamlit screen runs on the local machine and is not part of the Terraform. The API, the workers, and the summary job get the Application Insights connection string. The API sends its traces there. The worker and job entry points do not start the exporter yet. Front Door does not route by `home_region`, so a call can land in a region that has no row for the account, and that region answers 401.
+This is the multi-region Azure design, kept in the repo with its Terraform. It is not a running deployment; the prototype runs on one machine with `docker compose up` (see [This machine](#this-machine)). In the design, a signed-in request enters through Front Door. The API answers a question, queues an upload or an All groupings report, or writes an on-demand grouped summary. Only the API sits behind Front Door. The Streamlit screen runs on the local machine and is not part of the Terraform. The API, the workers, and the summary job get the Application Insights connection string. The API sends its traces there. The worker and job entry points do not start the exporter yet. Front Door does not route by `home_region`, so a call can land in a region that has no row for the account, and that region answers 401.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "monospace", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 16, "nodeSpacing": 20, "rankSpacing": 40, "htmlLabels": false, "wrappingWidth": 210, "useMaxWidth": false}}}%%
@@ -37,9 +37,9 @@ Checks the token and the account limit"]
     API["FastAPI
 Checks the token and the request count"]
     SB["Service Bus queues
-Holds the analysis job"]
+Holds the analysis and report jobs"]
     WK["Container Apps workers
-Runs the queued file"]
+Runs the queued file or report"]
     JOB["Scheduled summary job
 Every 15 minutes"]
     PG["PostgreSQL
@@ -87,6 +87,8 @@ Predefined AI prompts. Loudness and pace numbers from measuring tools"]
   API --> CHAT
   WK --> LG
   JOB --> LLM
+  API -->|"on-demand summaries"| LLM
+  WK -->|"report summaries"| LLM
 ```
 
 ## This machine

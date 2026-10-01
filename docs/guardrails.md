@@ -118,7 +118,7 @@ The All groupings report (`POST /api/v1/reports`) takes only whitelisted `groupi
 
 Before a configuration is stored, the server serializes the cleaned options and runs content safety on that string. Azure mode calls Azure AI Content Safety `text:shieldPrompt` (Prompt Shields) and `text:analyze`. Mock mode, used locally and in tests, checks a fixed phrase list: jailbreak phrases such as "ignore previous instructions" and a small set of high-severity phrases. A hit returns HTTP 400 and nothing is saved.
 
-Prompt Shields (in mock mode, the jailbreak phrase list) runs on the custom filter string. The harm categories are not checked there.
+Prompt Shields (in mock mode, the jailbreak phrase list) runs on the custom filter string. The harm categories are not checked there. The `taxonomy` list filter on `GET /files` is not screened: it is only compared with stored topics in code and never reaches a model. The chat `search_files` tool gives its `taxonomy` argument the full check.
 
 ### 3. The transcript is data, not instructions
 
