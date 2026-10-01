@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     max_chunks: int = 20
     # Group summaries are written in parallel, this many model calls at a time.
     summary_workers: int = 6
+    # Upload times in chat replies (to tell same-name recordings apart) use this zone.
+    display_timezone: str = "Asia/Manila"
     mock_stage_delay_sec: float = 0.0
     max_upload_bytes: int = 20 * 1024 * 1024
     home_region: str = "local"

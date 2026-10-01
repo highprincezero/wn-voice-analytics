@@ -24,7 +24,13 @@ from app.chat.prompts import (
     build_planner_messages,
 )
 from app.chat.schemas import ChatReplyBody
-from app.chat.tools import TOOL_NAMES, TOOL_SPECS, execute_tool, prepare_arguments
+from app.chat.tools import (
+    TOOL_NAMES,
+    TOOL_SPECS,
+    execute_tool,
+    named_filename,
+    prepare_arguments,
+)
 from app.config import get_settings
 from app.db.models import AudioFile
 from app.timeutil import utcnow
@@ -168,6 +174,11 @@ def _profile_choice(message: str) -> dict | None:
     found = _UUID.findall(message)
     if found:
         arguments["file_id"] = found[0]
+    else:
+        named = named_filename(message)
+        if named:
+            # Resolved to the newest recording with this name in prepare_arguments.
+            arguments["file_id"] = named
     return {"intent": "profile", "tool_name": "profile_speaker", "arguments": arguments}
 
 
@@ -682,6 +693,38 @@ def _rules_reply(intent: str, asked: str, tool_result: dict, history: list) -> s
     return _answer_sentence(asked, reply)
 
 
+def _id_labels(tool_result: object) -> dict[str, str]:
+    labels: dict[str, str] = {}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            key = node.get("id") or node.get("file_id")
+            if key and (node.get("label") or node.get("filename")):
+                labels[str(key).lower()] = str(node.get("label") or node.get("filename"))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(tool_result)
+    return labels
+
+
+def _without_ids(reply: str, tool_result: object) -> str:
+    """Replies name recordings, never ids: each id becomes the recording's label."""
+    labels = _id_labels(tool_result)
+
+    def swap_id(match: re.Match) -> str:
+        return labels.get(match.group(0).lower(), "that recording")
+
+    cleaned = _UUID.sub(swap_id, reply)
+    cleaned = re.sub(
+        r"\b(?:with )?IDs?\s*(?=[A-Za-z0-9_\-]+\.(?:wav|mp3|m4a|ogg|flac))", "", cleaned
+    )
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
 def _has_tool(state: dict) -> bool:
     return bool(state.get("tool_name"))
 
@@ -804,7 +847,7 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
                 state["reply"] = _rules_reply(intent, asked, tool_result, history)
                 return state
             reply = _fit_reply(asked, _bound(written))
-            state["reply"] = _answer_sentence(asked, reply)
+            state["reply"] = _without_ids(_answer_sentence(asked, reply), tool_result)
         return state
 
     plan_step = Step("plan", plan)

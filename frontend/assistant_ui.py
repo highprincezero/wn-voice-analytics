@@ -341,7 +341,10 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 .st-key-va-logs { padding: 10px 12px 12px !important; gap: 0.5rem !important; }
 .va-lg-title {
   font-size: 0.66rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase;
-  color: #9aa0ab; display: flex; align-items: center; gap: 6px;
+  color: #9aa0ab; display: flex; align-items: center; gap: 6px; line-height: 1.6;
+  position: relative; z-index: 1; background: #f6f7f9;
+  /* The divider sits under the header, never through it. */
+  padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid #e3e6eb;
 }
 .va-lg-title .pip { width: 6px; height: 6px; border-radius: 50%; background: #b8bec8; }
 .va-lg-empty {
@@ -352,8 +355,13 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 .va-lg-empty b { display: block; color: #8b919c; font-weight: 600; font-size: 0.84rem; }
 .va-lg-head {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.7rem; color: #7b818c; border-top: 1px dashed #dde0e5; padding-top: 8px;
+  font-size: 0.72rem; color: #7b818c; border-top: 1px dashed #dde0e5;
+  padding-top: 10px; margin-top: 12px; line-height: 1.5;
   display: flex; gap: 6px; align-items: baseline;
+}
+/* The newest turn comes first, right under the header: no divider above it. */
+.va-lg-title + .va-lg-head, [class*="st-key-va-logs"] .va-lg-head:first-of-type {
+  border-top: none; margin-top: 0; padding-top: 2px;
 }
 .va-lg-head b { color: #4b5160; font-weight: 700; }
 .va-lg-head .when { color: #a3a9b4; margin-left: auto; }
@@ -2064,9 +2072,26 @@ def _steps_html(steps: list[dict]) -> str:
         f"<small>Chose {html.escape(names)}</small></div></div>"
     ]
     for step in steps:
-        args = ", ".join(f"{key}={value}" for key, value in step["arguments"].items())
+        raw = step.get("raw") or {}
+        name_shown = str(raw.get("label") or raw.get("filename") or "")
+        parts = []
+        for key, value in step["arguments"].items():
+            # Show the recording's name, never its raw id.
+            if key == "file_id" and name_shown:
+                parts.append(name_shown)
+            else:
+                parts.append(f"{key}={value}")
+        args = ", ".join(parts)
         klass = "va-step warn" if step["error"] else "va-step"
         label = _TOOL_LABEL.get(step["name"], step["name"])
+        via = raw.get("audio_fetched_via")
+        if via and name_shown:
+            how = "via MCP fetch_audio" if via == "mcp" else "from blob storage"
+            rows.append(
+                '<div class="va-step"><span class="dot"></span><div><b>Fetched audio</b>'
+                f"<small><code>fetch_audio({html.escape(name_shown)})</code></small>"
+                f"<small>{html.escape(how)}</small></div></div>"
+            )
         rows.append(
             f'<div class="{klass}"><span class="dot"></span><div><b>{html.escape(label)}</b>'
             f"<small><code>{html.escape(step['name'])}({html.escape(args)})</code></small>"

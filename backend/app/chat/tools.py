@@ -1,14 +1,17 @@
 """Fixed tool set for the chat agent. Every query filters on the caller's user id."""
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.analysis.audio_features import ensure_pcm16_wav
+from app.analysis.mcp_audio import fetch_audio_via_mcp
 from app.analysis.providers.intelligence import get_intelligence
 from app.analysis.speaker_skill import acoustic_profile
 from app.chat.schemas import (
@@ -17,6 +20,7 @@ from app.chat.schemas import (
     RunSummaryArgs,
     SearchFilesArgs,
 )
+from app.config import get_settings
 from app.db.models import Analysis, AudioFile, Transcript
 from app.guardrails.safety import get_safety
 from app.jobs.summary_job import run_rollup
@@ -306,6 +310,97 @@ def _stored_file(db: Session, user_id: uuid.UUID, name: str) -> AudioFile | None
     )
 
 
+_FILENAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9 _\-.()]*?\.(?:wav|mp3|m4a|ogg|flac))\b", re.I)
+
+
+def named_filename(message: str) -> str | None:
+    """A recording filename written in the question itself, such as audio_2.mp3."""
+    for line in (message or "").splitlines():
+        if line.strip().lower().startswith("file_id="):
+            continue
+        found = _FILENAME.findall(line)
+        if found:
+            return found[0].strip().rsplit(" ", 1)[-1]
+    return None
+
+
+def _same_name(db: Session, user_id: uuid.UUID, file_id: str, filename: str) -> bool:
+    """True when file_id is one of this account's recordings with this filename."""
+    try:
+        wanted = uuid.UUID(file_id)
+    except ValueError:
+        return False
+    row = (
+        db.query(AudioFile.original_filename)
+        .filter(AudioFile.user_id == user_id, AudioFile.id == wanted)
+        .one_or_none()
+    )
+    return row is not None and str(row[0]).lower() == filename.lower()
+
+
+def _local_time(value: object) -> str:
+    try:
+        stamp = datetime.fromisoformat(str(value))
+    except ValueError:
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    try:
+        zone = ZoneInfo(get_settings().display_timezone)
+    except Exception:
+        zone = timezone.utc
+    return stamp.astimezone(zone).strftime("%H:%M")
+
+
+def label_files(db: Session, user_id: uuid.UUID, result: object) -> dict[str, str]:
+    """Give every recording in a tool result a readable label: its filename, plus the
+    upload time when the account has several recordings with that name. Returns
+    id -> label, so a reply can never show a raw id."""
+    found: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("filename") and (node.get("id") or node.get("file_id")):
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(result)
+    if not found:
+        return {}
+    counts = dict(
+        db.query(func.lower(AudioFile.original_filename), func.count(AudioFile.id))
+        .filter(AudioFile.user_id == user_id)
+        .group_by(func.lower(AudioFile.original_filename))
+        .all()
+    )
+    labels: dict[str, str] = {}
+    for item in found:
+        name = str(item["filename"])
+        count = int(counts.get(name.lower(), 1))
+        label = name
+        if count > 1:
+            when = _local_time(item.get("created_at"))
+            if not when:
+                row = (
+                    db.query(AudioFile.created_at)
+                    .filter(
+                        AudioFile.user_id == user_id,
+                        AudioFile.id == uuid.UUID(str(item.get("id") or item.get("file_id"))),
+                    )
+                    .one_or_none()
+                )
+                when = _local_time(row[0].isoformat()) if row and row[0] else ""
+            label = f"{name} (uploaded {when})" if when else name
+            item["same_name_count"] = count
+        item["label"] = label
+        labels[str(item.get("id") or item.get("file_id"))] = label
+    return labels
+
+
 def _pinned_file_id(message: str) -> str | None:
     for line in (message or "").splitlines():
         stripped = line.strip()
@@ -332,6 +427,14 @@ def prepare_arguments(
         return cleaned
     raw = cleaned.get("file_id")
     text = "" if raw is None else str(raw).strip()
+    # A filename written in this question wins over a file from history or the model.
+    # With several recordings of that name, the newest is used.
+    named = named_filename(message)
+    if named and db is not None:
+        match = _stored_file(db, user_id, named)
+        if match is not None and not _same_name(db, user_id, text, match.original_filename):
+            cleaned["file_id"] = str(match.id)
+            return cleaned
     if text:
         try:
             cleaned["file_id"] = str(uuid.UUID(text))
@@ -352,6 +455,22 @@ def prepare_arguments(
     return cleaned
 
 
+def _fetch_audio(storage_key: str) -> tuple[bytes | None, str]:
+    """This recording's audio, fetched fresh for this turn, and how: "mcp" through the MCP
+    fetch_audio tool (as transcription does), or "blob" when MCP is off or errored."""
+    url = get_settings().mcp_audio_url
+    if url:
+        try:
+            logger.info("chat MCP tool fetch_audio %s", storage_key)
+            return fetch_audio_via_mcp(url, storage_key), "mcp"
+        except Exception:
+            logger.warning("MCP fetch_audio failed; reading the same blob directly", exc_info=True)
+    try:
+        return get_blob_store().download(storage_key), "blob"
+    except FileNotFoundError:
+        return None, "blob"
+
+
 def profile_speaker(db: Session, user_id: uuid.UUID, args: ProfileSpeakerArgs) -> dict:
     query = db.query(AudioFile).filter(AudioFile.user_id == user_id)
     if args.file_id is not None:
@@ -369,9 +488,8 @@ def profile_speaker(db: Session, user_id: uuid.UUID, args: ProfileSpeakerArgs) -
         blocked = _blocked_payload(audio, analysis)
         blocked["file_id"] = blocked.pop("id")
         return blocked
-    try:
-        data = get_blob_store().download(audio.storage_key)
-    except FileNotFoundError:
+    data, source = _fetch_audio(audio.storage_key)
+    if data is None:
         return {"error": "not_found"}
     playable = ensure_pcm16_wav(data)
     try:
@@ -380,6 +498,7 @@ def profile_speaker(db: Session, user_id: uuid.UUID, args: ProfileSpeakerArgs) -
         logger.warning("speaker profile fell back to the audio measure", exc_info=True)
         result = acoustic_profile(playable, audio.original_filename)
     result["filename"] = audio.original_filename
+    result["audio_fetched_via"] = source
     result["file_id"] = str(audio.id)
     return result
 
@@ -419,4 +538,6 @@ def execute_tool(
     except ValidationError:
         return {"error": "invalid_arguments"}
     # Looks up the function by name and calls it with (db, user_id, parsed args).
-    return _FUNCS[name](db, user_id, parsed)
+    result = _FUNCS[name](db, user_id, parsed)
+    label_files(db, user_id, result)
+    return result

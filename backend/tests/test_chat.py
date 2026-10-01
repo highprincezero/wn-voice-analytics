@@ -1000,3 +1000,75 @@ def test_chat_screens_every_history_turn(client, auth, monkeypatch):
     )
     assert response.status_code == 400
     assert set(seen) == {"hello there", "first question", "first answer", history[2]["content"]}
+
+
+# Regression: the question names audio_2 after a turn about audio_1. The named file wins
+# over history and over a pinned file id, the newest of several same-name files is used,
+# and its audio is fetched fresh through the MCP fetch_audio tool.
+def test_named_file_overrides_history_and_fetches_its_audio_through_mcp(client, auth, monkeypatch):
+    first = _upload(client, auth, name="audio_1.wav")
+    _upload(client, auth, name="audio_2.wav")
+    newest = _upload(client, auth, name="audio_2.wav")
+    from app.storage.blob import get_blob_store
+
+    fetched: list[str] = []
+
+    def fetch(url, blob_name):
+        fetched.append(blob_name)
+        return get_blob_store().download(blob_name)
+
+    monkeypatch.setattr(get_settings(), "mcp_audio_url", "http://mcp.test/mcp")
+    monkeypatch.setattr("app.chat.tools.fetch_audio_via_mcp", fetch)
+    history = [
+        {"role": "user", "content": "What topics came up in audio_1.wav?"},
+        {"role": "assistant", "content": "audio_1.wav is about a call list."},
+    ]
+    message = f"Can you guess the gender of the speaker in audio_2.wav?\nfile_id={first['id']}"
+    response = client.post(
+        "/api/v1/chat", headers=auth, json={"message": message, "history": history}
+    )
+    assert response.status_code == 200, response.text
+    call = response.json()["tool_calls"][0]
+    assert call["name"] == "profile_speaker"
+    assert call["arguments"]["file_id"] == newest["id"]
+    assert call["result"]["filename"] == "audio_2.wav"
+    assert len(fetched) == 1 and newest["id"] in fetched[0]
+    assert first["id"] not in fetched[0]
+    assert call["result"]["same_name_count"] == 2
+    assert call["result"]["label"].startswith("audio_2.wav (uploaded ")
+
+
+def test_named_file_wins_over_the_planner_file_for_get_analysis(client, auth, monkeypatch):
+    first = _upload(client, auth, name="audio_1.wav")
+    second = _upload(client, auth, name="audio_2.wav")
+    _plan_as_azure(
+        monkeypatch,
+        {"intent": "analysis", "tool_name": "get_analysis", "arguments": {"file_id": first["id"]}},
+        "audio_2.wav is about a reunion.",
+    )
+    response = client.post(
+        "/api/v1/chat", headers=auth, json={"message": "What topics came up in audio_2.wav?"}
+    )
+    call = response.json()["tool_calls"][0]
+    assert call["arguments"]["file_id"] == second["id"]
+    assert call["result"]["filename"] == "audio_2.wav"
+
+
+def test_replies_name_recordings_and_never_show_ids(client, auth, monkeypatch):
+    older = _upload(client, auth, name="audio_2.wav")
+    newer = _upload(client, auth, name="audio_2.wav")
+    _upload(client, auth, name="audio_1.wav")
+    _plan_as_azure(
+        monkeypatch,
+        {"intent": "inventory", "tool_name": "search_files", "arguments": {}},
+        f"They are the items with IDs {older['id']} and {newer['id']} (filename audio_2.wav).",
+    )
+    response = client.post(
+        "/api/v1/chat", headers=auth, json={"message": "Which recordings are longer than 0.1 s?"}
+    )
+    body = response.json()
+    reply = body["reply"]
+    assert older["id"] not in reply and newer["id"] not in reply
+    assert reply.count("audio_2.wav (uploaded ") == 2
+    labels = [item["label"] for item in body["tool_calls"][0]["result"]["items"]]
+    assert "audio_1.wav" in labels
