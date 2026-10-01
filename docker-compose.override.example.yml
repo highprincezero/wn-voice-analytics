@@ -1,0 +1,79 @@
+# Optional dev tools. Copy to docker-compose.override.yml (that name is git-ignored):
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+# `docker compose up` then loads it on top of docker-compose.yml automatically.
+# Maps are merged key by key; lists are appended unless tagged !override.
+# No real secrets here: the Azurite key is the public emulator key and the pgAdmin login is local only.
+services:
+  # Redis browser: http://localhost:5540 (add a database with host `redis`, port 6379).
+  redisinsight:
+    image: redis/redisinsight:latest
+    ports:
+      - "5540:5540"
+    # Short-form depends_on: only waits for the container to start, no health condition.
+    depends_on:
+      - redis
+
+  # Web storage explorer for the local blob store: http://localhost:8080
+  # Blob only: this stack's Azurite does not run queue or table.
+  azurite-ui:
+    image: sebagomez/azurestorageexplorer:latest
+    # Image publishes amd64 only. Apple Silicon runs it through emulation.
+    platform: linux/amd64
+    ports:
+      - "8080:8080"
+    environment:
+      AZURITE: "true"
+      # Well-known Azurite (local storage emulator) dev key, not a real secret.
+      AZURE_STORAGE_CONNECTIONSTRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
+    depends_on:
+      - azurite
+
+  # Flower: web UI for Celery workers and tasks: http://localhost:5555
+  flower:
+    image: mher/flower:2.0
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      FLOWER_PORT: "5555"
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
+  # Postgres admin: http://localhost:5050 (no login screen in desktop mode).
+  # Register a server: host `postgres`, port 5432, database `voice`, user `voice`, password `voice`.
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+  # Dozzle: browser log viewer, filtered to this Compose project: http://localhost:9999
+  dozzle:
+    image: amir20/dozzle:latest
+    environment:
+      DOZZLE_ENABLE_ACTIONS: "true"
+      DOZZLE_FILTER: "label=com.docker.compose.project=voice-analytics"
+    volumes:
+      # Read-only Docker socket so it can read container logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "9999:8080"
+
+  # Streams Redis commands live to show Celery queue activity (`docker compose logs -f redis-watch`).
+  redis-watch:
+    image: redis:7-alpine
+    tty: true
+    command: ["sh", "-c", "redis-cli -h redis monitor | grep -E 'LPUSH|HSET. .unacked|HDEL. .unacked'"]
+    depends_on:
+      - redis
+
+volumes:
+  pgadmin-data:

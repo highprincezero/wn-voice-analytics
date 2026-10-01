@@ -150,16 +150,16 @@ Queues in each region:
 | --- | --- |
 | `transcription` | Speech-to-text, then the rest of the pipeline |
 | `llm-layer1` | Reserved for a later split of the summary stage |
-| `llm-layer2` | Reserved for a later split of RMS and spaCy |
+| `llm-layer2` | Reserved for a later split of the Analytics prompts (`gpt-5-mini` plus the measuring tools) |
 | `rollup` | Aggregate summaries |
 
-The worker in this POC runs the full pipeline for any analysis message. That is idempotent. At 0.56 files/s it is enough. If transcription latency or file rate grows, move the LLM call onto `llm-layer1` so I/O wait does not scale the spaCy replicas. Suggested caps once split:
+The worker in this POC runs the full pipeline for any analysis message. That is idempotent. At 0.56 files/s it is enough. If transcription latency or file rate grows, move the two LLM calls onto `llm-layer1` and `llm-layer2` so model wait does not scale the transcription replicas. Suggested caps once split:
 
 | Stage | In-flight at 0.56/s | Replica cap in Terraform |
 | --- | --- | --- |
 | Transcription, 15 s, async HTTP | 0.56 * 15 ≈ 9 | worker max 20 |
 | Layer 1, 4 s | 0.56 * 4 ≈ 3 | same worker pool today |
-| Layer 2, 1 s CPU | under 1 core | same worker pool today |
+| Layer 2, one `gpt-5-mini` call plus the RMS and pace tools | 0.56 * call seconds; the tools need under 1 core | same worker pool today |
 | API | 187 rps | min 2, max 8 |
 
 ### When summaries run

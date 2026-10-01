@@ -2,7 +2,7 @@
 
 API means application programming interface.
 
-`http://localhost:8000` under `/api/v1`. This machine uses port 8001.
+`http://localhost:8000` under `/api/v1`.
 
 ## Names
 
@@ -23,6 +23,33 @@ API means application programming interface.
 | GET, POST, PUT, DELETE | the HTTP methods listed on each route |
 
 Authenticated routes send `Authorization: Bearer <token>`. Errors look like `{"detail": "..."}`.
+
+Passwords are stored only as bcrypt hashes. Sign-up and log-in return a JWT signed with `JWT_SECRET` (HS256); its subject (`sub`) is the account id and it expires after `JWT_EXPIRE_MINUTES` (1440). Every route takes the account from the token, so another account's ids answer 404.
+
+## Request bodies
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `POST /auth/signup` | JSON `{"email": "...", "password": "..."}` | 201 `{"access_token", "token_type": "bearer", "user_id", "email"}` |
+| `POST /auth/login` | JSON `{"email": "...", "password": "..."}` | 200, same shape as sign-up |
+| `POST /files` | multipart, one `files` part per file (up to 10) | 201 `{"items": [{"id", "status": "uploaded", "stage": "queued", ...}]}` |
+| `GET /files/{id}` | none | 200 the recording: `status`, `stage`, `summary`, `taxonomy`, `layer2`, `transcript` |
+| `POST /chat` | JSON `{"message": "...", "history": [], "session_id": null}`; only `message` is required, extra fields are 422 | 200 `{"reply", "tool_calls", "session_id"}` |
+
+```bash
+API=http://localhost:8000/api/v1
+curl -s -X POST $API/auth/signup -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alicepass123"}'
+TOKEN=$(curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alicepass123"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+FILE_ID=$(curl -s -X POST $API/files -H "Authorization: Bearer $TOKEN" \
+  -F files=@samples/sample_call.wav \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')
+curl -s $API/files/$FILE_ID -H "Authorization: Bearer $TOKEN"     # repeat until "status": "completed"
+curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"message":"What action items came out of my recordings?"}'
+```
 
 ## Routes
 

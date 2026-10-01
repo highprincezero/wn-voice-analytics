@@ -15,7 +15,7 @@ flowchart LR
 
 | | |
 | --- | --- |
-| Sign up | Hashed password. Later calls send a token |
+| Sign up | The password is stored only as a bcrypt hash. Log-in returns a signed JWT (HS256) whose subject is the account id; every later call sends it, and each route returns only that account's data |
 | Upload | 10 files, 20 MB. wav, mp3, m4a, ogg, flac |
 | Filter | Date, duration, topic, Analytics |
 | Insights | Length, summary, professional topics, personal topics, upcoming events |
@@ -74,11 +74,14 @@ Schema: [backend/sql/001_schema.sql](backend/sql/001_schema.sql).
 
 ## Run locally
 
-Docker, and about 2 GB of image space.
+Needs Docker with Compose v2, and about 10 GB of disk: about 7.5 GB of images plus about 2 GB of build cache.
 
 ```bash
+cp .env.example .env      # mock mode: no keys needed, leave the Azure lines empty
 docker compose up --build
 ```
+
+Check it is up: `curl http://localhost:8000/api/v1/health` returns `{"status":"ok"}` and `curl http://localhost:8000/api/v1/meta` shows `"llm_provider":"mock"`.
 
 Open http://localhost:8501. The logged-out caption says mock mode is on. Create an account (password at least 8 characters). You land on Audio Analytics Agent.
 
@@ -91,15 +94,22 @@ Show activity log starts off. Turn it on to see the live log, then the activity 
 | Service | Port | Role |
 | --- | --- | --- |
 | web | 8501 | Streamlit |
-| api | 8000 | FastAPI. This machine publishes 8001 |
+| api | 8000 | FastAPI. Health: http://localhost:8000/api/v1/health |
 | postgres | 5432 | Database `voice`, and `langfuse` for traces. User `voice` |
 | redis | 6379 | 0 is the job queue. 2 is the rate limit and Langfuse |
 | worker | | Celery, including the schedule |
 | azurite | 10000 | Local blob store, container `voice` |
 | azurite-mcp | 8090 | `fetch_audio` for the transcription step |
-| langfuse-web | 3000 | Traces, when both keys are set. Names are in [Glossary](docs/glossary.md) |
+| langfuse-web | 3000 | Traces, when both keys are set (see Langfuse below). Names are in [Glossary](docs/glossary.md) |
 
-A local override also starts Redis Insight (5540), Azurite UI (8080), Flower (5555), pgAdmin (5050), and Dozzle (9999). That file is not in git.
+Optional dev tools: Redis Insight (5540), Azurite UI (8080), Flower (5555), pgAdmin (5050), and Dozzle (9999). They live in an override file that Compose loads on its own once it has the expected name (that name is git-ignored):
+
+```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
+docker compose up -d
+```
+
+pgAdmin opens without a login. Register a server with host `postgres`, port 5432, user `voice`, password `voice`.
 
 ```mermaid
 flowchart LR
@@ -117,21 +127,46 @@ Cloud leaves `MCP_AUDIO_URL` empty.
 | Other files | Stand-in from the file hash |
 | Regenerate | `python3 scripts/generate_sample_audio.py` |
 
-### Tests
+### Langfuse
 
-```bash
-python3 -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-ruff check backend frontend
-cd backend && pytest
+Local Langfuse runs at http://localhost:3000. Log in with `admin@local.dev` / `admin-dev-password` (set `LANGFUSE_INIT_USER_EMAIL` and `LANGFUSE_INIT_USER_PASSWORD` in `.env` before the first start to change them). It creates the project `voice-analytics` with the keys `pk-lf-local-dev` / `sk-lf-local-dev`.
+
+Tracing is off until both keys are set. To send traces to the local Langfuse, put these in `.env` and restart the worker (`docker compose up -d worker`):
+
+```text
+LANGFUSE_PUBLIC_KEY=pk-lf-local-dev
+LANGFUSE_SECRET_KEY=sk-lf-local-dev
+LANGFUSE_HOST=http://langfuse-web:3000
 ```
 
-Local tests need Python 3.12, the same version CI and the api image use, and `ffmpeg` on the PATH for the mp3 tests. They do not need Docker. The partition check runs when `POSTGRES_TEST_URL` is set. CI sets it.
+`LANGFUSE_HOST` defaults to `http://langfuse-web:3000` in Compose. Traces come from the worker: each model step of the analysis pipeline and the background reports is one generation. With `LLM_PROVIDER=azure` they show the real deployment and prompts. In mock mode they are labelled `mock` and hold the stand-in output. The API container gets no Langfuse keys, so chat turns are not traced.
 
-To run the same tests inside the api image (it has no pytest or ruff, so the dev requirements are installed into the throwaway container first):
+### Tests
+
+Local tests need Python 3.12, the same version CI and the api image use, and `ffmpeg` on the PATH for the mp3 tests. Use a virtual environment (system Python on recent macOS and Linux refuses `pip install`):
+
+```bash
+python3.12 -m venv .venv && . .venv/bin/activate
+python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+ruff check backend frontend
+ruff format --check backend frontend
+(cd backend && pytest)
+```
+
+Plain `pytest` gives 153 passed and 1 skipped. The skipped one is the Postgres partition check, which needs `POSTGRES_TEST_URL`. If your `ffmpeg` cannot encode ogg (some Homebrew builds), the ogg upload test is skipped as well: 152 passed and 2 skipped. To run it against the Compose Postgres (stack up), create a separate test database first (run from the repo root). That gives 154 passed:
+
+```bash
+docker compose exec postgres createdb -U voice voice_test
+(cd backend && POSTGRES_TEST_URL=postgresql://voice:voice@localhost:5432/voice_test pytest)
+```
+
+**Never point `POSTGRES_TEST_URL` at the app database (`voice`). The test runs `DROP SCHEMA public CASCADE` and wipes every account, file and result in it.** CI uses `voice` only because its Postgres is a throwaway service container.
+
+To run the same tests inside the api image (it has no pytest or ruff, so the dev requirements are installed into the throwaway container first; the cache plugin is off because the container user cannot write to the mounted repo):
 
 ```bash
 docker compose run --rm --no-deps -T -v "$PWD:/repo" -w /repo/backend api \
-  sh -c 'pip install -q --user -r requirements-dev.txt && python -m pytest'
+  sh -c 'pip install -q --user -r requirements-dev.txt && python -m pytest -p no:cacheprovider'
 ```
 
 ## Azure
@@ -189,6 +224,36 @@ Copy [.env.example](.env.example) to `.env`. Mock mode needs no keys. The commen
 ## API
 
 Base path `/api/v1`. Authenticated routes send `Authorization: Bearer <token>`. Request notes: [docs/api.md](docs/api.md).
+
+Passwords are stored only as bcrypt hashes. Sign-up and log-in return a JWT signed with `JWT_SECRET` (HS256). Its subject is the account id and it expires after `JWT_EXPIRE_MINUTES` (1440). Every route reads the account from the token, so another account's file id answers 404.
+
+Try it with curl against the local stack:
+
+```bash
+API=http://localhost:8000/api/v1
+
+# Sign up (201). Password 8 to 72 bytes. A repeat email answers 409.
+curl -s -X POST $API/auth/signup -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alicepass123"}'
+
+# Log in (200) and keep the token.
+TOKEN=$(curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alicepass123"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+# Upload (201). Multipart field `files`, repeat it for up to 10 files.
+FILE_ID=$(curl -s -X POST $API/files -H "Authorization: Bearer $TOKEN" \
+  -F files=@samples/sample_call.wav \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')
+
+# Poll until status is completed (a few seconds in mock mode).
+curl -s $API/files/$FILE_ID -H "Authorization: Bearer $TOKEN" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["stage"])'
+
+# Ask a question (200). Send the returned session_id with the next turn to keep one chat.
+curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"message":"What action items came out of my recordings?"}'
+```
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
