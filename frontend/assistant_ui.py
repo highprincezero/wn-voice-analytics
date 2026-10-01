@@ -3562,17 +3562,6 @@ def _watch_percent(watched: list[dict]) -> int:
     return int(total / len(watched))
 
 
-def _processing_meter(items: list[dict]) -> tuple[int, str]:
-    """Percent and label for recordings that are still being analyzed."""
-    running = [item for item in items if item.get("status") in {"uploaded", "processing"}]
-    if not running:
-        return 100, "Saved"
-    percent = _watch_percent(running)
-    if len(running) == 1:
-        return percent, _processing_label(running)
-    return percent, f"Processing · {len(running)} still running"
-
-
 def _await_progress(label: str, work):
     """Advance a bar on this thread while work() runs. The bar reaches 100 at the end."""
     bar = st.progress(0, text=label)

@@ -72,9 +72,6 @@ class ApiClient:
             "POST", "/api/v1/auth/login", json={"email": email, "password": password}
         ).json()
 
-    def me(self) -> dict:
-        return self._request("GET", "/api/v1/auth/me").json()
-
     def upload(self, files: list[tuple[str, bytes]]) -> dict:
         # Multipart upload: repeated 'files' fields, each a (filename, bytes, content-type) tuple.
         payload = [("files", (name, data, "audio/wav")) for name, data in files]
@@ -95,9 +92,6 @@ class ApiClient:
 
     def list_events(self, limit: int = 300) -> dict:
         return self._request("GET", "/api/v1/events", params={"limit": limit}).json()
-
-    def delete_file(self, file_id: str) -> None:
-        self._request("DELETE", f"/api/v1/files/{file_id}")
 
     def prompt_options(self) -> list[dict]:
         return self._request("GET", "/api/v1/prompts/options").json()["options"]
@@ -121,9 +115,6 @@ class ApiClient:
 
     def list_reports(self) -> dict:
         return self._request("GET", "/api/v1/reports").json()
-
-    def list_summaries(self) -> dict:
-        return self._request("GET", "/api/v1/summaries").json()
 
     def chat(self, message: str, history: list[dict], session_id: str | None = None) -> dict:
         payload: dict = {"message": message, "history": history}

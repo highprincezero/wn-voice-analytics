@@ -149,7 +149,6 @@ services:
       # Shared env plus worker-only telemetry/tracing keys below.
       <<: *app-env
       APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
-      OTEL_ENABLED: "true"
       # Empty keys turn Langfuse tracing off. The host defaults to the local langfuse-web service.
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}

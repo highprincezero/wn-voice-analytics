@@ -34,3 +34,18 @@ RECORDING_01_SCRIPT.md
 RECORDING_02_SCRIPT.md
 # pgAdmin server list used by docker-compose.override.yml. Local only.
 .local-tools/
+
+# Secrets and local files that must never be committed.
+*.tfvars
+!*.tfvars.example
+.DS_Store
+.env.*
+!.env.example
+*.log
+*.bak
+*.orig
+# Local notes and recording scripts, whatever their exact name.
+PLAN_*.md
+RECORDING_*.md
+*DEMO_SCRIPT*.md
+SESSION_*.md

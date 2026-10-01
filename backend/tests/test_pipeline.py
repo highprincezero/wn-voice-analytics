@@ -7,7 +7,7 @@ from app.analysis.prompts import LAYER1_SYSTEM_PROMPT, build_layer1_messages
 from app.analysis.providers.azure import AzureIntelligence
 from app.analysis.providers.mock import SAMPLE_CALL_SHA256, MockIntelligence
 from app.analysis.schemas import validate_layer1
-from app.analysis.spacy_features import pos_counts
+from app.analysis.spacy_features import pos_counts, speaking_pace
 from app.config import get_settings
 from tests.conftest import wav_bytes
 
@@ -336,18 +336,15 @@ def test_compressed_audio_has_duration_and_rms():
 
 
 def test_mp3_layer2_has_rms_and_pace():
-    from app.analysis.layer2 import run_layer2
-    from app.guardrails.catalog import default_selections
-
+    # The measuring tools behind the Analytics prompts, called directly on an mp3.
     data = _encode(wav_bytes(seconds=2.0, amp=0.5, freq=440), "mp3", "libmp3lame")
     duration = measure_duration(data)
-    result = run_layer2(
-        data, "The quick brown fox calls a new client.", duration, default_selections(), True
-    )
-    assert result["rms_energy"]["rms_mean"] > 0
-    assert result["speaking_pace"]["words_per_minute"] > 0
-    assert result["pos_counts"]["noun_count"] >= 2
-    assert result["pos_counts"]["adjective_count"] >= 1
+    transcript = "The quick brown fox calls a new client."
+    assert rms_features(data, 250)["rms_mean"] > 0
+    assert speaking_pace(transcript, duration)["words_per_minute"] > 0
+    counts = pos_counts(transcript, top_n=5)
+    assert counts["noun_count"] >= 2
+    assert counts["adjective_count"] >= 1
 
 
 def test_undecodable_bytes_raise():

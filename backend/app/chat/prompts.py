@@ -26,8 +26,9 @@ CHAT_SYSTEM_PROMPT = (
 CAPABILITIES = (
     "Transcribe a recording the user uploads here. Upload starts processing on its own.",
     "Write each recording's summary and topics: professional, personal, and upcoming events.",
-    "Measure Analytics for a recording: speaking pace, sentiment, loudness, "
-    "and noun and adjective counts.",
+    "Run Analytics on a recording with predefined AI prompts: loudness (RMS) and speaking "
+    "pace (words per minute) from measuring tools, noun and adjective counts, sentiment, "
+    "action items, tone, and key entities.",
     "Find recordings by date, duration, or topic, and list upcoming events the user mentioned.",
     "Summarize recordings grouped by topic, day, week, month, sentiment, or all together.",
     "Answer about one recording by its id or file name, or the newest one: "

@@ -23,4 +23,3 @@ python-multipart==0.0.32
 httpx==0.28.1
 azure-monitor-opentelemetry==1.8.10
 opentelemetry-instrumentation-httpx==0.65b0
-opentelemetry-instrumentation-openai

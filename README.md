@@ -4,7 +4,7 @@
 flowchart LR
   signup[Sign up] --> upload[Upload]
   upload --> result[Words summary topics Analytics]
-  result --> audi[Audi]
+  result --> chat[Chat]
   result --> summaries[Summaries]
 ```
 
@@ -30,7 +30,10 @@ flowchart LR
 ```text
 backend/            API, workflow, worker, schema, tests
 frontend/           Streamlit
+mcp/                Local MCP server: fetch_audio reads the Azurite blob for transcription
 samples/            The demo WAV
+scripts/            generate_sample_audio.py rebuilds the demo WAV
+skills/             The speaker-profile skill (prompt mirrored in speaker_skill.py)
 docs/               Short write-ups
 infra/terraform/    Azure, one module per region
 docker-compose.yml  API, Streamlit, Postgres, Redis, worker, Azurite, MCP, Langfuse

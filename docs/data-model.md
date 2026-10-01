@@ -21,12 +21,14 @@ erDiagram
   USERS ||--o| PROMPT_CONFIGS : sets
   USERS ||--o{ TRANSCRIPTS : owns
   USERS ||--o{ ANALYSES : owns
-  USERS ||--o{ SUMMARIES : owns
+  USERS ||--o{ ROLLUP_SUMMARIES : owns
   USERS ||--o{ GROUP_REPORTS : owns
   USERS ||--o{ FILE_EVENTS : logs
+  USERS ||--o{ CHAT_SESSIONS : owns
   AUDIO_FILES ||--o| TRANSCRIPTS : has
   AUDIO_FILES ||--o| ANALYSES : has
   AUDIO_FILES ||--o{ FILE_EVENTS : logs
+  CHAT_SESSIONS ||--o{ CHAT_MESSAGES : holds
 
   USERS {
     uuid id PK
@@ -63,7 +65,7 @@ erDiagram
     jsonb selections
     timestamp updated_at
   }
-  SUMMARIES {
+  ROLLUP_SUMMARIES {
     uuid user_id PK
     uuid id PK
     text group_by
@@ -84,6 +86,19 @@ erDiagram
     text stage
     text level
   }
+  CHAT_SESSIONS {
+    uuid user_id PK
+    uuid id PK
+    timestamp created_at
+  }
+  CHAT_MESSAGES {
+    uuid user_id PK
+    uuid id PK
+    uuid session_id
+    text role
+    text content
+    int seq
+  }
 ```
 
 | Table | What it stores |
@@ -93,7 +108,7 @@ erDiagram
 | `transcripts` | The words |
 | `analyses` | Summary, topics, and Analytics |
 | `prompt_configs` | Which Analytics this account turned on |
-| Summaries | Combined summary of completed recordings |
+| `rollup_summaries` | Combined summary of completed recordings |
 | `group_reports` | The All groupings report: every grouping, code stats, and an AI summary per group |
 | `file_events` | The processing log |
 | `chat_sessions` | One chat for this account |
@@ -113,9 +128,11 @@ flowchart TB
   parts --> transcripts["transcripts. Table. The words."]
   parts --> analyses["analyses. Table. Summary, topics, and Analytics."]
   parts --> prompts["prompt_configs. Table. Which Analytics is turned on."]
-  parts --> summaries["Summaries. Table. Grouped summaries of completed recordings."]
+  parts --> summaries["rollup_summaries. Table. Grouped summaries of completed recordings."]
   parts --> reports["group_reports. Table. All groupings reports."]
   parts --> events["file_events. Table. The processing log."]
+  parts --> chatSessions["chat_sessions. Table. One chat for this account."]
+  parts --> chatMessages["chat_messages. Table. The questions and answers in that chat."]
   person --> blob["Blob. File store. The audio, the transcript, and the analysis file."]
 ```
 

@@ -29,16 +29,19 @@
 
 Langfuse is the trace store at port 3000. Each row below is a name on a trace. A model call is one row. A workflow step is another row. The workflow runner is Microsoft Agent Framework. The recording workflow is named analysis. The chat workflow is named chat.
 
+Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, where the model column shows `mock`. Only processes that have both Langfuse keys send traces. Compose gives them to the worker, not the API, so steps that run in the API do not appear there.
+
+| Name (azure) | Name (mock) | Meaning |
+| --- | --- | --- |
+| AudioLayer1 | layer1 | Insights for one short recording: summary and topics. The model column shows gpt-5-mini. |
+| AudioChunk | layer1-map | One piece of a long transcript. |
+| AudioReduce | layer1-reduce | Joins those pieces into one Insights result. |
+| AudioRollup | rollup | One summary for a group of recordings. The scheduled summaries and the All groupings report run in the worker. On-demand summaries run in the API. |
+| AudioLayer2Prompts | layer2-prompts | Analytics for one recording: the ticked predefined prompts, with the measure_rms and measure_speaking_pace tool round trip. |
+| speaker-profile | speaker-profile | Speaker profile for one recording, written after that model call succeeds. It runs in the API, from the chat `profile_speaker` tool. |
+
 | Name | Meaning |
 | --- | --- |
-| AudioLayer1 | Insights for one short recording: summary and topics. The model column shows gpt-5-mini. |
-| AudioChunk | One piece of a long transcript. |
-| AudioReduce | Joins those pieces into one Insights result. |
-| AudioRollup | One summary for a group of recordings. |
-| AudioLayer2Prompts | Analytics for one recording: the ticked predefined prompts, with the measure_rms and measure_speaking_pace tool round trip. |
-| VoiceLayer1 | Earlier name for AudioLayer1. Rows end 2026-09-29. |
-| VoiceRollup | Earlier name for AudioRollup. Rows end 2026-09-29. |
-| speaker-profile | Speaker profile for one recording. Written after that model call succeeds. |
 | workflow.build | The workflow is assembled before it runs. |
 | workflow.run | One run of the workflow. |
 | executor.process prepare | Measure duration, and whether the file is a wav. |
@@ -70,10 +73,9 @@ A folder row means the whole folder.
 | `.env.example` | yes | |
 | `.github/` | | |
 | `.gitignore` | yes | |
-| `PLAN_STATUS.md` | | |
 | `README.md` | yes | yes |
 | `backend/` | yes | yes |
-| `docker-compose.override.yml` | yes | |
+| `docker-compose.override.example.yml` | yes | |
 | `docker-compose.yml` | yes | |
 | `docs/` | yes | yes |
 | `frontend/` | yes | |
@@ -82,8 +84,10 @@ A folder row means the whole folder.
 | `ruff.toml` | | |
 | `samples/` | yes | |
 | `scripts/` | | |
+| `skills/` | | |
 
 | name | Note |
 | --- | --- |
 | `mcp/` | Local Azurite server, port 8090. Not in the cloud design |
-| `docker-compose.override.yml` | This machine only |
+| `docker-compose.override.example.yml` | Optional local dev tools. Copy it to `docker-compose.override.yml`, which is git-ignored |
+| `skills/` | The speaker-profile skill write-up. The prompt it describes is `SKILL_PROMPT` in `backend/app/analysis/speaker_skill.py` |

@@ -35,17 +35,6 @@ def init_telemetry() -> None:
         # Auto-traces every httpx request (e.g. the LLM REST calls) as a dependency span.
         HTTPXClientInstrumentor().instrument()
 
-        try:
-            from opentelemetry.instrumentation.openai import OpenAIInstrumentor
-
-            # Optional: instruments the openai SDK, if the package is installed.
-            OpenAIInstrumentor().instrument()
-        except ImportError:
-            logger.warning(
-                "opentelemetry-instrumentation-openai not installed; "
-                "skipping OpenAI instrumentation"
-            )
-
         _initialized = True
         logger.info("Azure Monitor telemetry initialized")
     except Exception:

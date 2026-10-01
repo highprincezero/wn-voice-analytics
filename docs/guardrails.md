@@ -47,7 +47,7 @@ flowchart LR
 
 | | |
 | --- | --- |
-| Mock safety | This machine and the tests |
+| Mock safety | `SAFETY_PROVIDER=mock`, the default in Compose and `.env.example`, and the tests |
 | Azure safety | `SAFETY_PROVIDER=azure` |
 | Passwords | hashed |
 | Tokens | expire |
@@ -157,7 +157,7 @@ The per-user rate limit is 120 requests per 60 seconds (`RATE_LIMIT_REQUESTS`, `
 
 ### 6. Chat tools and the question text
 
-`POST /api/v1/chat` runs the same content-safety check on the new message and on every history turn. A hit is HTTP 400 and the agent does not run. History roles are only `user` and `assistant`, and history is capped at eight turns. A `system` role is rejected before the agent sees it.
+`POST /api/v1/chat` screens the turn before the agent runs. The new message gets the full content-safety check: Prompt Shields plus the harm categories. Each earlier user turn in the history gets Prompt Shields only. Assistant turns are not screened: they are the app's own replies, and a harm score on a summary of a call must not block every later question. A turn that was already blocked (a user turn answered by a block message, and that message) is dropped from the history first, because it never reached the model. A hit is HTTP 400 and the agent does not run. History roles are only `user` and `assistant`, and history is capped at eight turns. A `system` role is rejected before the agent sees it.
 
 The system text is a constant. The question is placed in the user message inside `<question>` tags. Tool results go in `<tool_result>` tags. Both are described as data. The planner and compose prompts carry the same named injection patterns, and the question, history turns, tool results, context, and previous reply have reserved tags neutralized before they are fenced. Tests check that a jailbreak sentence in the question does not appear in the system text.
 

@@ -69,14 +69,6 @@ CATALOG: dict[str, dict] = {
     },
 }
 
-TONE_LABELS = ("formal", "casual", "tense", "friendly", "neutral")
-SENTIMENT_LABELS = ("positive", "neutral", "negative")
-
-
-def option_kind(option_id: str) -> str:
-    return str(CATALOG.get(option_id, {}).get("kind") or "llm")
-
-
 CUSTOM_FILTERS: dict[str, dict] = {
     "sentiment": {
         "path": ("sentiment_lexicon", "label"),

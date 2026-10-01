@@ -18,7 +18,7 @@
 
 ## System
 
-A signed-in request enters through Front Door. The API answers a question, queues an upload, or writes the grouped summaries.
+This is the multi-region Azure design, kept in the repo with its Terraform. It is not a running deployment; the prototype runs on one machine with `docker compose up` (see [This machine](#this-machine)). In the design, a signed-in request enters through Front Door. The API answers a question, queues an upload, or writes the grouped summaries. The API and the workers send their traces to Application Insights.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "monospace", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 16, "nodeSpacing": 20, "rankSpacing": 40, "htmlLabels": false, "wrappingWidth": 210, "useMaxWidth": false}}}%%
@@ -49,7 +49,7 @@ Audio copied across zones and to the paired region"]
     CACHE["Redis
 The account request count"]
     OBS["Application Insights
-The trace of the request"]
+Receives the request traces in the design"]
     FD --> APIM --> API
     API --> SB --> WK
     API --> CACHE
@@ -128,18 +128,33 @@ and analytics for one recording." }
 [table:prompt_configs]
 Stores which analytics
 this account turned on." }
-  voiceDb --> tblSummaries@{ shape: bow-rect, label: "Summaries
+  voiceDb --> tblSummaries@{ shape: bow-rect, label: "Rollup Summaries
 (A.1.6)
-[summaries]
+[table:rollup_summaries]
 Stores the analysis aggregation
 of those AI summaries, for all of
 the account's completed recordings,
 or grouped by topic, day, week,
 month, or sentiment." }
-  voiceDb --> tblEvents@{ shape: bow-rect, label: "File Events
+  voiceDb --> tblReports@{ shape: bow-rect, label: "Group Reports
 (A.1.7)
+[table:group_reports]
+Stores the All groupings report:
+every grouping, the numbers per group,
+and an AI summary per group." }
+  voiceDb --> tblEvents@{ shape: bow-rect, label: "File Events
+(A.1.8)
 [table:file_events]
 Stores the file processing logs." }
+  voiceDb --> tblChatSessions@{ shape: bow-rect, label: "Chat Sessions
+(A.1.9)
+[table:chat_sessions]
+Stores one chat for this account." }
+  voiceDb --> tblChatMessages@{ shape: bow-rect, label: "Chat Messages
+(A.1.10)
+[table:chat_messages]
+Stores the questions and answers
+in that chat." }
   database --> lfDb@{ shape: cyl, label: "langfuse
 (A.2)
 [db:langfuse]
@@ -253,12 +268,12 @@ Which file calls the next.
 ```mermaid
 %%{init: {"theme": "base", "htmlLabels": true, "securityLevel": "antiscript", "themeVariables": {"fontFamily": "monospace", "fontSize": "15px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"htmlLabels": true, "curve": "linear", "padding": 18, "nodeSpacing": 28, "rankSpacing": 72, "wrappingWidth": 480, "useMaxWidth": false}}}%%
 flowchart LR
-  streamlit["<span style='font-weight:normal'>streamlit_app.py</span> | <b>render_assistant()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/streamlit_app.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Opens the assistant.</span></i>"] --> assistant["<span style='font-weight:normal'>assistant_ui.py</span> | <b>upload()</b>, <b>chat()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/assistant_ui.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends what you picked.</span></i>"]
-  assistant --> client["<span style='font-weight:normal'>api_client.py</span><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/api_client.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends the request.</span></i>"]
+  streamlit["<span style='font-weight:normal'>streamlit_app.py</span><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/streamlit_app.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Signs in, then opens the assistant.</span></i>"] -->|"render_assistant()"| assistant["<span style='font-weight:normal'>assistant_ui.py</span> | <b>render_assistant()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/assistant_ui.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends what you picked.</span></i>"]
+  assistant --> client["<span style='font-weight:normal'>api_client.py</span> | <b>upload()</b>, <b>chat()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/api_client.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends the request.</span></i>"]
   client -->|"upload()"| files["<span style='font-weight:normal'>files.py</span> | <b>upload_files()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/api/routes/files.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Saves the recording.</span></i>"]
   client -->|"chat()"| chat
   files -->|"enqueue_analysis()"| tasks
-  files --> service["<span style='font-weight:normal'>analysis/service.py</span> | <b>run_file_analysis()</b>, <b>run_graph()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/service.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Runs the analysis.</span></i>"]
+  files --> service["<span style='font-weight:normal'>analysis/service.py</span> | <b>run_file_analysis()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/service.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Runs the analysis.</span></i>"]
   service --> graphPy["<span style='font-weight:normal'>analysis/graph.py</span> | <b>run_graph()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/graph.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Microsoft Agent Framework works through one recording.<br>First the words, then the summary, then the Analytics prompts.</span></i>"]
   tasks["<span style='font-weight:normal'>jobs/tasks.py</span> | <b>analyze_file_task()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/jobs/tasks.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Runs the queued job.</span></i>"] --> service
   chat["<span style='font-weight:normal'>chat.py</span> | <b>chat()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/api/routes/chat.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Answers the question.</span></i>"] --> agent["<span style='font-weight:normal'>chat/agent.py</span> | <b>run_chat_agent()</b>, <b>execute_tool()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/chat/agent.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Microsoft Agent Framework answers one question<br>about this account's recordings.</span></i>"]
@@ -278,8 +293,8 @@ flowchart LR
 | Schedule | Celery beat | Every 15 minutes |
 | Files | Azurite, then `fetch_audio` when `MCP_AUDIO_URL` is set | Blob. The bytes are already loaded |
 | Database | PostgreSQL 16 | One server per region, plus a standby in another zone |
-| Models | Azure OpenAI and Content Safety when `LLM_PROVIDER` and `SAFETY_PROVIDER` are `azure` (as on this machine). Mock with no keys, the `.env.example` default | Azure OpenAI and Content Safety |
-| Front door | none on this machine | Front Door, then API Management |
+| Models | Azure OpenAI and Content Safety when `LLM_PROVIDER` and `SAFETY_PROVIDER` are `azure`. Mock by default (Compose and `.env.example`), with no keys | Azure OpenAI and Content Safety |
+| Front door | none locally | Front Door, then API Management |
 | Work | Inline in tests. Celery in Compose | One worker copy. The ceiling is 20 and no rule adds a copy |
 | Account limit | 120 a minute when the limiter is on | 120 a minute |
 | Trace | Langfuse when both keys are set | Same send. A failed send leaves the file result in place |

@@ -1,6 +1,6 @@
 # Scaling
 
-How the Azure deployment handles one request, and how many copies of each part run.
+How the Azure design would handle one request, and how many copies of each part would run. This is a design with Terraform that CI validates; it is not a running deployment.
 
 ## Names
 
@@ -123,8 +123,11 @@ flowchart TB
   parts --> transcripts
   parts --> analyses
   parts --> prompt_configs
-  parts --> summaries[Summaries]
+  parts --> rollup_summaries
+  parts --> group_reports
   parts --> file_events
+  parts --> chat_sessions
+  parts --> chat_messages
   uid --> keys["users/user_id/audio transcripts analysis"]
 ```
 

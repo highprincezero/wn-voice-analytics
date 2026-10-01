@@ -52,7 +52,6 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = "voice-analytics-api"
 
-    partition_modulus: int = 16
     chunk_chars: int = 4000
     max_chunks: int = 20
     # Group summaries are written in parallel, this many model calls at a time.
