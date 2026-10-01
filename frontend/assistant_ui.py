@@ -2831,10 +2831,10 @@ def _template_group(choice: str, slot: str) -> str:
 
 
 def _template_panel(api: ApiClient) -> None:
-    """One fixed question. The only choice is the period slot on the trend template."""
+    """Summarize across files: one fixed question. Only the trend question takes a period."""
     labels = dict(_TEMPLATES)
     choice = st.selectbox(
-        "Template",
+        "Summary",
         [item[0] for item in _TEMPLATES],
         format_func=lambda item: labels[item],
         key="va-template-choice",
@@ -2985,7 +2985,7 @@ def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
                 current = st.session_state.get("assistant_suggest")
                 st.session_state["assistant_suggest"] = None if current == "browse" else "browse"
                 st.rerun()
-            if st.button("Ask from a template", key="va-open-template", type="tertiary"):
+            if st.button("Summarize across files", key="va-open-template", type="tertiary"):
                 current = st.session_state.get("assistant_suggest")
                 st.session_state["assistant_suggest"] = (
                     None if current == "template" else "template"

@@ -84,7 +84,7 @@ Open http://localhost:8501. The logged-out caption says mock mode is on. Create 
 
 Upload the bundled sample from the assistant. Processing starts on its own. Analytics sits in a small box under the result.
 
-Pick which Analytics measures run, and their settings (loudness window, top words shown), in Analytics settings next to Ask from a template, or with `PUT /api/v1/prompts/config`. All four run by default. Changes apply to new uploads.
+Pick which Analytics measures run, and their settings (loudness window, top words shown), in Analytics settings next to Summarize across files, or with `PUT /api/v1/prompts/config`. All four run by default. Changes apply to new uploads.
 
 Show activity log starts off. Turn it on to see the live log, then the activity list below it, newest turn first. Off hides both. The choice stays through processing and reruns, and `?activity=1` or `?activity=0` in the address keeps it after a new log-in. The side panel stays put while the chat scrolls. The chat input stays pinned to the bottom. The opening screen offers two replies: Summarize my calls and Upload a recording.
 
@@ -214,6 +214,10 @@ Base path `/api/v1`. Authenticated routes send `Authorization: Bearer <token>`. 
 ## Guardrails
 
 [docs/guardrails.md](docs/guardrails.md).
+
+**Layer 2 design choice.** RMS loudness, noun and adjective counts, speaking pace, and sentiment are deterministic, so they are computed in code (RMS math, spaCy, a fixed word list), not by an LLM. That is more accurate, free, and repeatable, and the user's choices never reach any LLM, so they cannot carry a prompt injection. Choices are checked against a fixed whitelist with typed parameters. Users select and configure them in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI").
+
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any LLM call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
 ## Worth knowing
 

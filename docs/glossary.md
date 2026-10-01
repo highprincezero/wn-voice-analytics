@@ -69,10 +69,8 @@ A folder row means the whole folder.
 | `.env.example` | yes | |
 | `.github/` | | |
 | `.gitignore` | yes | |
-| `DEMO_SCRIPT.md` | yes | |
 | `PLAN_STATUS.md` | | |
 | `README.md` | yes | yes |
-| `SESSION_RECAP.md` | | |
 | `backend/` | yes | yes |
 | `docker-compose.override.yml` | yes | |
 | `docker-compose.yml` | yes | |

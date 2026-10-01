@@ -81,7 +81,9 @@ The catalog today:
 | `speaking_pace` | none | Words per minute from the transcript and the measured duration |
 | `sentiment_lexicon` | none | Counts against a fixed word list |
 
-Users pick which measures run, and their parameters, in the Analytics settings panel (next to Ask from a template) or with `PUT /api/v1/prompts/config`. All four run at their defaults until a choice is saved, and an empty list also means all four, so the panel asks for at least one. A saved choice applies to new uploads; unchecked measures are skipped.
+Users pick which measures run, and their parameters, in the Analytics settings panel (next to Summarize across files) or with `PUT /api/v1/prompts/config`. All four run at their defaults until a choice is saved, and an empty list also means all four, so the panel asks for at least one. A saved choice applies to new uploads; unchecked measures are skipped.
+
+**Layer 2 design choice.** RMS loudness, noun and adjective counts, speaking pace, and sentiment are deterministic, so they are computed in code (RMS math, spaCy, a fixed word list), not by an LLM. That is more accurate, free, and repeatable, and the user's choices never reach any LLM, so they cannot carry a prompt injection. Choices are checked against a fixed whitelist with typed parameters. Users select and configure them in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI").
 
 Custom list filters use the same idea. `custom` must be `name:value`, and `name` must be one of `sentiment`, `adjective_count`, `noun_count`, `wpm`, `rms_mean`. Sentiment values must be `positive`, `neutral`, or `negative`. Numeric filters must sit inside a declared range.
 
@@ -95,7 +97,11 @@ The same check runs on the custom filter string.
 
 ### 3. The transcript is data, not instructions
 
-System prompts are constants in `backend/app/analysis/prompts.py`. The transcript is placed only in the user message, inside `<transcript>` tags. The system text tells the model to treat that text as untrusted data and not to follow requests inside it. Tests assert that a jailbreak sentence does not appear in the system message.
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any LLM call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+
+System prompts are constants in `backend/app/analysis/prompts.py`. The transcript is placed only in the user message, inside `<transcript>` tags. Partial analyses go inside `<partial_analyses>` and group summaries inside `<summaries>`. The system text says only the system message gives instructions, that the fenced text is untrusted data from user audio, and names patterns to never obey: "ignore previous instructions", "you are now ...", lines starting with `system:`, role-play, requests to reveal the prompt, requests for other users' data, and requests to change the output format. Such text is only content to summarize, and the output stays the JSON schema.
+
+Before wrapping, `backend/app/guardrails/markers.py` rewrites any copy of a reserved tag inside the data (any case, spaces allowed, `&lt;` forms too) as plain text, so `</transcript>` becomes `[/transcript]` and spoken text cannot close the block early. Tests cover the escaping, the rules in every system prompt, and an injection transcript staying inside the markers. A jailbreak sentence never appears in the system message.
 
 After transcription, and before any summary call, every transcript goes through the same content-safety check:
 
@@ -129,7 +135,7 @@ The per-user rate limit is 120 requests per 60 seconds (`RATE_LIMIT_REQUESTS`, `
 
 `POST /api/v1/chat` runs the same content-safety check on the new message and on every history turn. A hit is HTTP 400 and the agent does not run. History roles are only `user` and `assistant`, and history is capped at eight turns. A `system` role is rejected before the agent sees it.
 
-The system text is a constant. The question is placed in the user message inside `<question>` tags. Tool results go in `<tool_result>` tags. Both are described as data. Tests check that a jailbreak sentence in the question does not appear in the system text.
+The system text is a constant. The question is placed in the user message inside `<question>` tags. Tool results go in `<tool_result>` tags. Both are described as data. The planner and compose prompts carry the same named injection patterns, and the question, history turns, tool results, context, and previous reply have reserved tags neutralized before they are fenced. Tests check that a jailbreak sentence in the question does not appear in the system text.
 
 The agent may execute only `search_files`, `get_analysis`, `run_summary`, and `profile_speaker`. Any other name returns `unknown_tool` and is not called. Arguments are parsed with Pydantic models that forbid extra fields, so a model cannot pass `user_id`. Each query adds the JWT subject's `user_id`. A foreign file id is `not_found`.
 
