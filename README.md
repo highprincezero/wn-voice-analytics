@@ -330,4 +330,4 @@ Summarize across files offers one summary at a time (trend per day, week, or mon
 
 ## Demo
 
-Record http://localhost:8501 in mock mode. Sign up, upload the bundled sample, and show Transcription, Insights, and Analytics. The last minute is the cloud picture in [Scaling](docs/scaling.md).
+The demo video shows the running app end to end at http://localhost:8501: sign up, log in, upload, transcription, Insights, Analytics, browsing results, summaries across files, and chat. The scalability design is not in the video; see [Scalability design](#scalability-design).
