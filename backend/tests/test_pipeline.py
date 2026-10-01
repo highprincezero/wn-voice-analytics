@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import ValidationError
 
 from app.analysis.audio_features import measure_duration, rms_features
@@ -9,9 +11,12 @@ from app.analysis.spacy_features import pos_counts
 from app.config import get_settings
 from tests.conftest import wav_bytes
 
+# backend/tests/<file> -> parents[2] is the repo root.
+SAMPLE_CALL = Path(__file__).resolve().parents[2] / "samples" / "sample_call.wav"
+
 
 def test_sample_file_hash_and_duration():
-    data = open("/workspace/samples/sample_call.wav", "rb").read()
+    data = SAMPLE_CALL.read_bytes()
     import hashlib
 
     assert hashlib.sha256(data).hexdigest() == SAMPLE_CALL_SHA256
@@ -232,3 +237,59 @@ def test_blank_chat_temperature_setting_is_unset():
     assert spaces.azure_openai_chat_temperature is None
     set_value = Settings.model_validate({"azure_openai_chat_temperature": "0.4"})
     assert set_value.azure_openai_chat_temperature == 0.4
+
+
+def _encode(data: bytes, fmt: str, codec: str) -> bytes:
+    """Re-encode a generated wav with ffmpeg (a small compressed fixture, made in the test)."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", "pipe:0", "-c:a", codec, "-f", fmt, "pipe:1"],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        pytest.skip(f"ffmpeg cannot encode {fmt}")
+    return proc.stdout
+
+
+def test_compressed_audio_has_duration_and_rms():
+    import math
+
+    import pytest
+
+    wav = wav_bytes(seconds=2.0, amp=0.5, freq=440)
+    for fmt, codec in (("mp3", "libmp3lame"), ("ogg", "libvorbis"), ("flac", "flac")):
+        data = _encode(wav, fmt, codec)
+        assert measure_duration(data) == pytest.approx(2.0, abs=0.1), fmt
+        features = rms_features(data, 250)
+        assert abs(features["rms_mean"] - (0.5 / math.sqrt(2))) < 0.03, fmt
+        assert features["windows"], fmt
+
+
+def test_mp3_layer2_has_rms_and_pace():
+    from app.analysis.layer2 import run_layer2
+    from app.guardrails.catalog import default_selections
+
+    data = _encode(wav_bytes(seconds=2.0, amp=0.5, freq=440), "mp3", "libmp3lame")
+    duration = measure_duration(data)
+    result = run_layer2(
+        data, "The quick brown fox calls a new client.", duration, default_selections(), True
+    )
+    assert result["rms_energy"]["rms_mean"] > 0
+    assert result["speaking_pace"]["words_per_minute"] > 0
+    assert result["pos_counts"]["noun_count"] >= 2
+    assert result["pos_counts"]["adjective_count"] >= 1
+
+
+def test_undecodable_bytes_raise():
+    import pytest
+
+    with pytest.raises(ValueError):
+        measure_duration(b"not audio at all")

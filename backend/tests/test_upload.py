@@ -1,4 +1,9 @@
+from pathlib import Path
+
 from tests.conftest import wav_bytes
+
+# backend/tests/<file> -> parents[2] is the repo root.
+SAMPLE_CALL = Path(__file__).resolve().parents[2] / "samples" / "sample_call.wav"
 
 
 def test_upload_lists_and_isolates_users(client, auth):
@@ -61,7 +66,7 @@ def test_filters_and_delete(client, auth):
             ]
         },
     )
-    sample = open("/workspace/samples/sample_call.wav", "rb").read()
+    sample = SAMPLE_CALL.read_bytes()
     uploaded = client.post(
         "/api/v1/files",
         headers=auth,

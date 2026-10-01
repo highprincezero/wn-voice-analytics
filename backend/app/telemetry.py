@@ -42,7 +42,8 @@ def init_telemetry() -> None:
             OpenAIInstrumentor().instrument()
         except ImportError:
             logger.warning(
-                "opentelemetry-instrumentation-openai not installed; skipping OpenAI instrumentation"
+                "opentelemetry-instrumentation-openai not installed; "
+                "skipping OpenAI instrumentation"
             )
 
         _initialized = True

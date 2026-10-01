@@ -1,4 +1,6 @@
-"""Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
+"""Applicable only for cloud provisioning.
+
+This file is used only when deployed to the cloud with a multi-region deployment.
 
 Publish a job onto Azure Service Bus. Local compose uses Celery instead.
 """

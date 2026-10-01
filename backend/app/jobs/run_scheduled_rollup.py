@@ -1,4 +1,6 @@
-"""Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
+"""Applicable only for cloud provisioning.
+
+This file is used only when deployed to the cloud with a multi-region deployment.
 
 Azure Container Apps Job entrypoint for the scheduled rollup.
 """

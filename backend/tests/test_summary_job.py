@@ -1,14 +1,18 @@
 from datetime import datetime
+from pathlib import Path
 
-from app.analysis.map_reduce import map_reduce_summaries
+from app.analysis.summarize_group import summarize_group
 from app.config import get_settings
 from app.db.models import Analysis, User
 from app.db.session import SessionLocal
 from app.jobs.summary_job import run_rollup, scheduled_rollup_all_users
 from tests.conftest import wav_bytes
 
+# backend/tests/<file> -> parents[2] is the repo root.
+SAMPLE_CALL = Path(__file__).resolve().parents[2] / "samples" / "sample_call.wav"
 
-def test_map_reduce_calls_summarizer_more_than_once(monkeypatch):
+
+def test_summarize_group_calls_summarizer_more_than_once(monkeypatch):
     monkeypatch.setattr(get_settings(), "chunk_chars", 40)
     calls = {"count": 0}
 
@@ -17,13 +21,13 @@ def test_map_reduce_calls_summarizer_more_than_once(monkeypatch):
         return " | ".join(items)[:40]
 
     texts = [f"summary number {index} about budget" for index in range(8)]
-    result = map_reduce_summaries(texts, summarize)
+    result = summarize_group(texts, summarize)
     assert calls["count"] > 1
     assert result
 
 
 def test_on_demand_rollup_groups_by_taxonomy(client, auth):
-    sample = open("/workspace/samples/sample_call.wav", "rb").read()
+    sample = SAMPLE_CALL.read_bytes()
     for name in ("one.wav", "two.wav"):
         response = client.post(
             "/api/v1/files",
@@ -48,6 +52,64 @@ def test_on_demand_rollup_groups_by_taxonomy(client, auth):
     assert listed.json()["items"]
     bad = client.post("/api/v1/summaries", headers=auth, json={"group_by": "password"})
     assert bad.status_code == 400
+
+
+def test_day_and_month_buckets_and_rejected_template_slot(client, auth):
+    for name in ("aug.wav", "sep.wav"):
+        response = client.post(
+            "/api/v1/files",
+            headers=auth,
+            files=[("files", (name, wav_bytes(), "audio/wav"))],
+        )
+        assert response.status_code == 201, response.text
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == "ada@example.com").one()
+        rows = (
+            db.query(Analysis)
+            .filter(Analysis.user_id == user.id)
+            .order_by(Analysis.created_at.asc())
+            .all()
+        )
+        assert len(rows) == 2
+        rows[0].created_at = datetime(2026, 8, 30, 12, 0, 0)
+        rows[1].created_at = datetime(2026, 9, 2, 12, 0, 0)
+        db.commit()
+    finally:
+        db.close()
+    rejected = client.post(
+        "/api/v1/summaries",
+        headers=auth,
+        json={"template_id": "trend", "slot": "year"},
+    )
+    assert rejected.status_code == 400
+    unknown = client.post(
+        "/api/v1/summaries",
+        headers=auth,
+        json={"group_by": "year"},
+    )
+    assert unknown.status_code == 400
+    month = client.post(
+        "/api/v1/summaries",
+        headers=auth,
+        json={"template_id": "trend", "slot": "month"},
+    )
+    assert month.status_code == 201, month.text
+    result = month.json()["result"]
+    assert result["group_by"] == "month"
+    assert result["file_count"] == 2
+    assert {group["key"] for group in result["groups"]} == {"2026-08", "2026-09"}
+    counts = {group["key"]: group["file_count"] for group in result["groups"]}
+    assert counts == {"2026-08": 1, "2026-09": 1}
+    day = client.post("/api/v1/summaries", headers=auth, json={"group_by": "day"})
+    assert day.status_code == 201, day.text
+    assert {group["key"] for group in day.json()["result"]["groups"]} == {
+        "2026-08-30",
+        "2026-09-02",
+    }
+    topic = client.post("/api/v1/summaries", headers=auth, json={"template_id": "by_topic"})
+    assert topic.status_code == 201, topic.text
+    assert topic.json()["result"]["group_by"] == "taxonomy_label"
 
 
 def test_time_range_and_scheduled_rollup_are_idempotent_within_interval(client, auth):
