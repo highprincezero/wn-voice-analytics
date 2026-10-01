@@ -563,7 +563,7 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
 .st-key-va-card-suggest [data-testid="stCaptionContainer"] p {
   color: #a3aab8; font-size: 0.76rem; line-height: 1.4; margin: 0;
 }
-.st-key-va-suggest-actions { margin-top: 0; }
+.st-key-va-suggest-actions { margin-top: 4px; flex-wrap: wrap; row-gap: 6px; }
 .va-grid {
   display: flex; flex-direction: column; border: 1px solid #e8ebf2; border-radius: 12px;
   background: #fff;
@@ -630,12 +630,35 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
   color: #8a92a6; font-size: 0.8rem;
 }
 .va-grid p.va-none.va-show { display: block; }
-.st-key-va-suggest-actions button {
-  border-radius: 999px; background: transparent; border: 1px solid transparent; color: #8b93a7;
-  font-size: 0.8rem; font-weight: 500; min-height: 30px; padding: 2px 10px; box-shadow: none;
+/* Next-step pills. The open one is wrapped in st-key-va-pill-on-*, the rest in -off-. */
+[class*="st-key-va-pill-"] { width: auto !important; flex: 0 0 auto !important; }
+[class*="st-key-va-pill-"] button,
+[class*="st-key-va-pill-"] button:focus,
+[class*="st-key-va-pill-"] button:focus:not(:active),
+[class*="st-key-va-pill-"] button:active {
+  border-radius: 999px; border: 1px solid #dde2ec !important; background: #f6f7fb !important;
+  color: #3d4556 !important; font-size: 0.82rem; font-weight: 550; min-height: 32px;
+  padding: 4px 14px; box-shadow: 0 1px 1px rgba(20, 28, 45, .04);
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
 }
-.st-key-va-suggest-actions button:hover {
-  border-color: #e6e9f2; color: #3d4556; background: rgba(255,255,255,.75);
+[class*="st-key-va-pill-"] button p { color: inherit !important; font-weight: inherit; }
+[class*="st-key-va-pill-"] button:hover {
+  background: #fff !important; border-color: #b9c4f5 !important; color: #3a5be8 !important;
+}
+[class*="st-key-va-pill-"] button:focus-visible { outline: 2px solid #b9c4f5; outline-offset: 2px; }
+[class*="st-key-va-pill-on-"] button,
+[class*="st-key-va-pill-on-"] button:focus,
+[class*="st-key-va-pill-on-"] button:focus:not(:active),
+[class*="st-key-va-pill-on-"] button:active,
+[class*="st-key-va-pill-on-"] button:hover {
+  background: #eef1fd !important; border-color: #3a5be8 !important; color: #3a5be8 !important;
+  font-weight: 650; box-shadow: 0 0 0 3px rgba(58, 91, 232, .10);
+}
+/* The opened panel: a light bordered box, set apart from the pills and the chat. */
+.st-key-va-suggest-panel {
+  margin-top: 10px; padding: 14px 16px 12px !important; background: #fff;
+  border: 1px solid #cfd6e4; border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(20, 28, 45, .07);
 }
 .va-out { font-size: 0.92rem; line-height: 1.55; color: #1f2330; }
 .va-out p { margin: 0 0 8px; }
@@ -852,6 +875,8 @@ div:has(> .st-key-va-logs), .st-key-va-logs {
     width: 100% !important;
   }
   .va-chips { margin-left: 0; }
+  .st-key-va-suggest-panel { padding: 10px 8px 8px !important; }
+  [class*="st-key-va-pill-"] button { padding: 4px 12px; }
   .va-taxrow { flex-direction: column; gap: 4px; }
   .va-taxrow .cat { flex-basis: auto; }
   .va-read { gap: 16px 22px; }
@@ -2081,6 +2106,8 @@ def _fresh_state() -> None:
     st.session_state["assistant_followup"] = ""
     st.session_state["assistant_run_files"] = []
     st.session_state["assistant_run_quiet"] = False
+    st.session_state.pop(_PENDING_KEY, None)
+    st.session_state.pop("assistant_reply_polls", None)
     st.session_state["assistant_show_uploader"] = False
     st.session_state["assistant_polls"] = 0
     st.session_state.pop("assistant_greeting", None)
@@ -3149,6 +3176,14 @@ def _analytics_panel(api: ApiClient) -> None:
     st.success(f"Saved. New uploads will run: {', '.join(names)}.")
 
 
+# Next steps under the saved recordings: (mode, label, button key, icon).
+_SUGGEST_ACTIONS = (
+    ("browse", "Browse results", "va-open-browse", ":material/table_view:"),
+    ("template", "Summarize across files", "va-open-template", ":material/summarize:"),
+    ("analytics", "Analytics settings", "va-open-analytics", ":material/tune:"),
+)
+
+
 def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
     rows = _safe_files(api) if files is None else files
     completed = [item for item in rows if item.get("status") == "completed"]
@@ -3160,30 +3195,24 @@ def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
             unsafe_allow_html=True,
         )
         st.caption(f"{len(completed)} completed. Pick a next step.")
-        with st.container(key="va-suggest-actions", horizontal=True, gap="small"):
-            if st.button("Browse results", key="va-open-browse", type="tertiary"):
-                current = st.session_state.get("assistant_suggest")
-                st.session_state["assistant_suggest"] = None if current == "browse" else "browse"
-                st.rerun()
-            if st.button("Summarize across files", key="va-open-template", type="tertiary"):
-                current = st.session_state.get("assistant_suggest")
-                st.session_state["assistant_suggest"] = (
-                    None if current == "template" else "template"
-                )
-                st.rerun()
-            if st.button("Analytics settings", key="va-open-analytics", type="tertiary"):
-                current = st.session_state.get("assistant_suggest")
-                st.session_state["assistant_suggest"] = (
-                    None if current == "analytics" else "analytics"
-                )
-                st.rerun()
         mode = st.session_state.get("assistant_suggest")
-        if mode == "browse":
-            _browse_panel(api)
-        elif mode == "template":
-            _template_panel(api)
-        elif mode == "analytics":
-            _analytics_panel(api)
+        with st.container(key="va-suggest-actions", horizontal=True, gap="small"):
+            for name, label, key, icon in _SUGGEST_ACTIONS:
+                # The button key stays the same; only the wrapper says which one is open.
+                state = "on" if mode == name else "off"
+                with st.container(key=f"va-pill-{state}-{name}", width="content"):
+                    if st.button(label, key=key, type="tertiary", icon=icon):
+                        st.session_state["assistant_suggest"] = None if mode == name else name
+                        st.rerun()
+        if mode not in {"browse", "template", "analytics"}:
+            return
+        with st.container(key="va-suggest-panel"):
+            if mode == "browse":
+                _browse_panel(api)
+            elif mode == "template":
+                _template_panel(api)
+            else:
+                _analytics_panel(api)
 
 
 def _greeting(returning: bool) -> str:
@@ -3950,21 +3979,125 @@ def _question_for_api(prompt: str) -> str:
     return prompt
 
 
-def _run_turn(api: ApiClient, prompt: str, placeholder) -> None:
+# A chat turn in flight. The request runs on its own thread and writes into a plain dict
+# kept in session state, so a rerun (the activity toggle, any widget) never loses it:
+# the next run waits on the same thread and shows the reply.
+_PENDING_KEY = "assistant_pending_chat"
+_REPLY_POLLS = 90  # about 3 minutes at one check every 2 seconds
+
+
+def _start_turn(api: ApiClient, prompt: str) -> dict:
     quiet = bool(st.session_state.pop("assistant_run_quiet", None))
     history = _history_for_api(prompt)
     message = _question_for_api(prompt)
     session_id = st.session_state.get("assistant_session_id") or None
-    try:
-        with placeholder.container():
-            with st.container(key="va-thinking"):
-                body = _await_progress(
-                    "Thinking",
-                    lambda: api.chat(message, history, session_id),
-                )
-    except ApiError as exc:
-        _say("assistant", exc.detail)
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = api.chat(message, history, session_id)
+        except Exception as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    pending = {"prompt": prompt, "quiet": quiet, "box": box, "thread": worker}
+    st.session_state[_PENDING_KEY] = pending
+    return pending
+
+
+def _wait_turn(api: ApiClient, placeholder) -> None:
+    """Wait for the turn in flight, then show its reply. Safe to resume after a rerun."""
+    pending = st.session_state.get(_PENDING_KEY)
+    if not pending:
         return
+    worker = pending.get("thread")
+    with placeholder.container():
+        with st.container(key="va-thinking"):
+            bar = st.progress(6, text="Thinking")
+            tick = 0
+            while worker is not None and worker.is_alive():
+                tick += 1
+                bar.progress(max(6, min(90, int(100 * (1 - 0.90**tick)))), text="Thinking")
+                worker.join(0.12)
+            bar.empty()
+    st.session_state.pop(_PENDING_KEY, None)
+    box = pending.get("box") or {}
+    error = box.get("error")
+    if error is not None:
+        if isinstance(error, ApiError) and error.status in {503, 504}:
+            # The server may still finish and save the reply; the reply check picks it up.
+            st.session_state["assistant_reply_polls"] = 0
+            return
+        detail = error.detail if isinstance(error, ApiError) else "The answer could not be loaded."
+        _say("assistant", detail)
+        return
+    _show_turn(api, str(pending.get("prompt") or ""), bool(pending.get("quiet")), box)
+
+
+def _run_turn(api: ApiClient, prompt: str, placeholder) -> None:
+    _start_turn(api, prompt)
+    _wait_turn(api, placeholder)
+
+
+def _saved_reply(api: ApiClient) -> str | None:
+    """The stored answer to the last unanswered question shown here, if the server has it."""
+    messages = st.session_state.get("assistant_messages") or []
+    if not messages or messages[-1].get("role") != "user":
+        return None
+    asked = (messages[-1].get("content") or "").strip()
+    try:
+        stored = api.chat_session().get("messages") or []
+    except ApiError:
+        return None
+    for index in range(len(stored) - 1, -1, -1):
+        item = stored[index]
+        content = (item.get("content") or "").strip()
+        if item.get("role") != "user" or not asked or not content.startswith(asked):
+            continue
+        if index + 1 < len(stored) and stored[index + 1].get("role") == "assistant":
+            reply = (stored[index + 1].get("content") or "").strip()
+            return reply or None
+        return None
+    return None
+
+
+def _waiting_for_reply() -> bool:
+    messages = st.session_state.get("assistant_messages") or []
+    return bool(
+        messages
+        and messages[-1].get("role") == "user"
+        # An upload note is answered by processing, not by a chat reply.
+        and not messages[-1].get("files")
+        and st.session_state.get("assistant_phase") == "ready"
+        and not st.session_state.get(_PENDING_KEY)
+        and not st.session_state.get("assistant_run")
+        and int(st.session_state.get("assistant_reply_polls") or 0) < _REPLY_POLLS
+    )
+
+
+@st.fragment(run_every=2.0)
+def _reply_watch(api: ApiClient) -> None:
+    """The last question has no answer here and nothing is in flight (the request was
+    cut off). Check the saved chat every 2 seconds and show the reply once it is stored."""
+    if not _signed_in() or not _waiting_for_reply():
+        return
+    polls = int(st.session_state.get("assistant_reply_polls") or 0) + 1
+    st.session_state["assistant_reply_polls"] = polls
+    reply = _saved_reply(api)
+    if reply:
+        _say("assistant", reply)
+        st.session_state.pop("assistant_reply_polls", None)
+        st.rerun()
+    if polls >= _REPLY_POLLS:
+        _say("assistant", "That answer did not come back. Please ask again.")
+        st.session_state.pop("assistant_reply_polls", None)
+        st.rerun()
+    st.caption("Still getting the answer...")
+
+
+def _show_turn(api: ApiClient, prompt: str, quiet: bool, box: dict) -> None:
+    body = box.get("value") or {}
     if body.get("session_id"):
         st.session_state["assistant_session_id"] = str(body["session_id"])
         st.session_state["assistant_session_ready"] = True
@@ -3992,19 +4125,20 @@ def render_assistant(api: ApiClient, sample_path: Path, meta: dict | None = None
 
     phase = st.session_state["assistant_phase"]
     prompt = st.session_state.get("assistant_run")
+    pending = st.session_state.get(_PENDING_KEY)
     show_activity = st.session_state["show_activity"]
     if show_activity:
         # Two columns: the chat (about 68%) and a gray activity/log column (about 32%).
         chat_col, log_col = st.columns([2.1, 1], gap="medium")
         with log_col:
-            _activity_column(api, messages, phase, bool(prompt))
+            _activity_column(api, messages, phase, bool(prompt or pending))
     else:
         # Activity hidden: no columns at all, so the chat takes the full width and the
         # activity panel, live log, and phone "Activity & logs" expander are never drawn.
         # st.container() is a plain block, so "with chat_col:" below works either way.
         chat_col = st.container()
     with chat_col:
-        first_screen = not messages and not prompt
+        first_screen = not messages and not prompt and not pending
         if first_screen:
             with st.container(key="va-open"):
                 _empty_state(api, sample_path)
@@ -4039,18 +4173,26 @@ def render_assistant(api: ApiClient, sample_path: Path, meta: dict | None = None
                     _type_followup(follow)
                 placeholder = st.empty()
                 typing = bool(follow)
+                if not prompt and not pending and _waiting_for_reply():
+                    _reply_watch(api)
                 # Inside the thread, so it scrolls with the chat and the page never grows.
                 if (
                     phase == "ready"
                     and messages
                     and not typing
                     and not prompt
+                    and not pending
                     and not st.session_state.get("assistant_show_uploader")
                 ):
                     _suggestion_box(api)
     # Top level, outside the columns, so Streamlit pins it to the bottom of the page.
     _composer("va-composer")
 
+    if pending and not first_screen:
+        # A turn started before a rerun is still ours: wait for it and show the reply.
+        _wait_turn(api, placeholder)
+        _take_next_run()
+        st.rerun()
     if prompt and not first_screen:
         st.session_state["assistant_run"] = None
         _run_turn(api, prompt, placeholder)
