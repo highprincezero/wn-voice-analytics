@@ -125,6 +125,8 @@ flowchart LR
 
 `POST /summaries` takes JSON `group_by` (default `user`), optional `time_from` and `time_to`, or a fixed question instead of `group_by`: `template_id` `by_topic`, `by_sentiment`, or `trend` with `slot` `day`, `week`, or `month`. Anything else is 400. It runs in the API and answers 201 with the stored summary.
 
+Stored times are UTC without an offset. `day`, `week` (ISO week), and `month` groups use the UTC date the analysis was saved, and `time_from` and `time_to` filter on that time, for summaries and reports alike.
+
 | `group_by` | |
 | --- | --- |
 | `user` | All of this account's completed recordings |

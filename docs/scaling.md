@@ -116,6 +116,8 @@ flowchart LR
 | gpt-5-mini | 1 | Data Zone Standard. 80 thousand tokens a minute |
 | Content Safety | 1 | S0 |
 
+Known limit: the model quotas are below the plan peak. These are estimates, not measurements. The plan numbers imply about 3 minutes of audio per file (900,000 minutes a month, 10,000 files a day). At 0.56 files a second, `gpt-4o-transcribe` needs about 100 thousand tokens a minute (about 1,000 audio tokens per audio minute, from OpenAI's $6 per million audio tokens and its $0.006 a minute estimate), against 30 thousand here. `gpt-5-mini` gets at least three requests per file with the default options (Insights, and Analytics with its tool round trip) plus chat; at a few thousand tokens per file that is well above 80 thousand. Over the quota Azure answers 429. A failed transcription or Insights call marks the file failed and Service Bus delivers it again; a failed Analytics call is stored as skipped. Raise `capacity` in `ai.tf` after checking the subscription quota and a load test.
+
 ## Rows
 
 How one account's rows are divided.
@@ -169,7 +171,7 @@ The worker in this POC runs the full pipeline for any analysis message. That is 
 | --- | --- | --- |
 | Whole file today (transcription, Insights, Analytics), about 25 s, synchronous HTTP | 0.56 * 25 ≈ 14 | worker 1 to 20, one waiting message per copy. 20 copies ≈ 0.8 files/s |
 | Layer 1 once split, 4 s | 0.56 * 4 ≈ 3 | same worker pool today |
-| Layer 2 once split, one `gpt-5-mini` call plus the RMS and pace tools | 0.56 * call seconds; the tools need under 1 core | same worker pool today |
+| Layer 2 once split, one `gpt-5-mini` call (two requests with the tool round trip) plus the RMS and pace tools | 0.56 * call seconds; the tools need under 1 core | same worker pool today |
 | API | worst case about 1,020 rps | min 2, max 8. The default rule asks for about 100 copies at this rate, so the API stays at 8 |
 
 ### Queue order, locks and retries

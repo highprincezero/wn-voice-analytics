@@ -56,7 +56,7 @@ The pictures are inside [Architecture](docs/architecture.md) and [Scaling](docs/
 | --- | --- |
 | Words | `gpt-4o-transcribe` |
 | Summary, topics, chat | `gpt-5-mini` |
-| Analytics | `gpt-5-mini`, one call per file with the ticked predefined prompts. Loudness and pace numbers come from server tools |
+| Analytics | `gpt-5-mini`, one call per file with the ticked predefined prompts. When loudness or pace is ticked, that call is two requests: the model asks for the server tools, then answers with their numbers |
 | Blocked transcript | Stored. Later steps do not run |
 
 Blob keys, container `voice`:
@@ -296,7 +296,7 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/reports` | yes | Recent reports |
 | GET | `/reports/{id}` | yes | One report and its status |
 | POST | `/chat` | yes | One question |
-| GET | `/chat/session` | yes | The latest chat and its saved turns |
+| GET | `/chat/session` | yes | The latest chat and its last 40 saved messages |
 | POST | `/chat/session` | yes | Start an empty chat |
 | GET | `/health` | no | Liveness |
 | GET | `/health/ready` | no | Database check |
@@ -319,7 +319,7 @@ Summarize across files offers one summary at a time (trend per day, week, or mon
 
 [docs/guardrails.md](docs/guardrails.md).
 
-**Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
+**Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file (two requests when loudness or pace is ticked, for the tool round trip). The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
 
 **Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. In Azure mode only the first 10,000 characters of each text are sent to the check; the rest is not screened. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
