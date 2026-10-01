@@ -1,10 +1,19 @@
-# Data model and storage keys
+# Data model
 
-Every tenant-owned row carries `user_id`. PostgreSQL hash-partitions those tables into 16 physical partitions. The application does not choose a partition. Postgres does, which means a query that filters on `user_id` prunes the other partitions.
+## Names
 
-The `users` table is the exception. A unique email cannot be enforced on a hash-partitioned table unless the email is part of the partition key. The account row stays unpartitioned. Audio, transcripts, analyses, prompt configuration, rollups, and file events are partitioned.
+| Short form | Meaning |
+| --- | --- |
+| ID | identifier |
+| PK | primary key |
+| UK | unique key |
+| UUID | universally unique identifier |
+| JSON | JavaScript Object Notation |
+| jsonb | binary JSON, the column type used for structured fields |
 
-![Data model](diagrams/data-model.png)
+[backend/sql/001_schema.sql](../backend/sql/001_schema.sql)
+
+Each box is a table in the PostgreSQL database named voice. The account is the signed-in person. The users table holds that person.
 
 ```mermaid
 erDiagram
@@ -12,8 +21,8 @@ erDiagram
   USERS ||--o| PROMPT_CONFIGS : sets
   USERS ||--o{ TRANSCRIPTS : owns
   USERS ||--o{ ANALYSES : owns
-  USERS ||--o{ ROLLUP_SUMMARIES : owns
-  USERS ||--o{ FILE_EVENTS : owns
+  USERS ||--o{ SUMMARIES : owns
+  USERS ||--o{ FILE_EVENTS : logs
   AUDIO_FILES ||--o| TRANSCRIPTS : has
   AUDIO_FILES ||--o| ANALYSES : has
   AUDIO_FILES ||--o{ FILE_EVENTS : logs
@@ -30,7 +39,6 @@ erDiagram
     uuid id PK
     text storage_key
     text status
-    text stage
     float duration_sec
     timestamp created_at
   }
@@ -54,7 +62,7 @@ erDiagram
     jsonb selections
     timestamp updated_at
   }
-  ROLLUP_SUMMARIES {
+  SUMMARIES {
     uuid user_id PK
     uuid id PK
     text group_by
@@ -65,37 +73,75 @@ erDiagram
     uuid user_id PK
     uuid id PK
     uuid file_id
-    text message
+    text stage
     text level
-    bigint seq
   }
 ```
 
-The executable schema is [backend/sql/001_schema.sql](../backend/sql/001_schema.sql). Primary keys on partitioned tables are `(user_id, id)` or, for prompt config, `(user_id)` alone. Foreign keys to `audio_files` use the composite `(user_id, file_id)` because a unique key on a partitioned table must include the partition column.
+| Table | What it stores |
+| --- | --- |
+| `users` | Email, hashed password, home region |
+| `audio_files` | The recording, its length, and where processing stands |
+| `transcripts` | The words |
+| `analyses` | Summary, topics, and Analytics |
+| `prompt_configs` | Which Analytics this account turned on |
+| Summaries | Combined summary of completed recordings |
+| `file_events` | The processing log |
+| `chat_sessions` | One chat for this account |
+| `chat_messages` | The questions and answers in that chat |
 
-## Tables
+## Rows
 
-| Table | Partition | What it stores |
-| --- | --- | --- |
-| `users` | none | Email, password hash, home region |
-| `audio_files` | `HASH(user_id)` modulus 16 | Filename, byte size, sha256, status, stage, duration, blob key |
-| `transcripts` | `HASH(user_id)` | Transcript text and blob key, one row per file |
-| `analyses` | `HASH(user_id)` | Summary, taxonomy, Layer 2 JSON, block reason |
-| `prompt_configs` | `HASH(user_id)` | Whitelisted Layer 2 selections |
-| `rollup_summaries` | `HASH(user_id)` | Aggregate job output |
-| `file_events` | `HASH(user_id)` | Timestamped pipeline log lines for that user's jobs |
+Where one account's rows and files live. Account is the person. PostgreSQL splits each table below into 16 pieces and keeps that account's rows in the same piece.
 
-`audio_files.status` is `uploaded`, `processing`, `completed`, `blocked`, or `failed`. `stage` is `upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, or `saved`. Analysis rows use `completed`, `blocked`, or `failed`.
+```mermaid
+flowchart TB
+  db[("PostgreSQL. Database named voice.")] --> users["users. Table. Kept whole so the email stays unique."]
+  person["Account. The signed-in person."] --> users
+  person --> uid["user_id. Column. That account's identifier."]
+  uid --> parts["16 pieces of each table. Same account, same piece."]
+  parts --> audio["audio_files. Table. One row per recording."]
+  parts --> transcripts["transcripts. Table. The words."]
+  parts --> analyses["analyses. Table. Summary, topics, and Analytics."]
+  parts --> prompts["prompt_configs. Table. Which Analytics is turned on."]
+  parts --> summaries["Summaries. Table. Grouped summaries of completed recordings."]
+  parts --> events["file_events. Table. The processing log."]
+  person --> blob["Blob. File store. The audio, the transcript, and the analysis file."]
+```
 
-`file_events` stores the message, stage, level (`info` or `error`), optional duration, filename, and a sequence number used to return the newest line first. Deleting a file deletes its events.
+## Status
 
-`rollup_summaries.group_by` is `user`, `taxonomy_label`, `week`, or `sentiment`. `trigger` is `schedule` or `on_demand`.
+Values of the status column on the audio_files table.
 
-Child partitions are named `{table}_p0` through `{table}_p15`.
+```mermaid
+flowchart LR
+  uploaded["status uploaded"] --> processing["status processing"]
+  processing --> completed["status completed"]
+  processing --> blocked["status blocked"]
+  processing --> failed["status failed"]
+```
 
-## Object keys
+## Stages
 
-Blobs live in one private container (`voice` by default):
+The order of work recorded for one file. layer1 is Insights. layer2 is Analytics.
+
+```mermaid
+flowchart LR
+  upload["stage upload"] --> queued["stage queued"] --> transcribe["stage transcribe"] --> safety["stage safety"] --> layer1["stage layer1. Insights"] --> layer2["stage layer2. Analytics"] --> saved["stage saved"]
+```
+
+## Summaries `group_by`
+
+| `group_by` | |
+| --- | --- |
+| `user` | All recordings. The key is `all` |
+| `taxonomy_label` | Topic |
+| `day` `week` `month` | Calendar |
+| `sentiment` | Sentiment |
+
+## Blob keys
+
+Paths in the Blob file store. These are files, not database tables.
 
 ```text
 users/{user_id}/audio/{file_id}.{ext}
@@ -103,13 +149,10 @@ users/{user_id}/transcripts/{file_id}.json
 users/{user_id}/analysis/{file_id}.json
 ```
 
-`ext` is one of `wav`, `mp3`, `m4a`, `ogg`, `flac`. The API rejects any other extension and any key that does not start with `users/{user_id}/`. Deletes remove the audio object, the transcript object, and the analysis object, then delete the audio row. Child rows cascade.
-
-Transcript JSON is `{ "text", "provider" }`. Analysis JSON repeats the summary, taxonomy, Layer 2 object, status, and block reason so the blob can be read without the database.
-
-## Why this shape
-
-- A list call is always `WHERE user_id = $1`, so it hits one hash bucket.
-- Blob layout matches the database key. A leaked container listing still groups objects by user, and the API refuses cross-user keys.
-- Re-running analysis updates the transcript and analysis rows for that file instead of inserting duplicates. Both tables have `UNIQUE (user_id, file_id)`.
-- `home_region` on the user is the hook for pinning a person to one of the N regional stacks. The POC stores `local`. Production routing is described in [scaling.md](scaling.md).
+| | |
+| --- | --- |
+| `ext` | `wav` `mp3` `m4a` `ogg` `flac` |
+| Download | Under that account's prefix |
+| Delete | The three objects and the rows |
+| Run again | Updates the transcript and the analysis |
+| `home_region` | `local` on this machine. One cloud region holds the account |

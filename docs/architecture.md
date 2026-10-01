@@ -1,143 +1,286 @@
 # Architecture
 
-Voice Analytics has three layers. The interface is a narrow Streamlit client. The implementation layer stores data, authenticates users, and runs background work. The intelligence layer turns audio into a transcript, a summary, a taxonomy, and optional Layer 2 features.
+## Names
 
-## Layers
-
-![System architecture](diagrams/system-architecture.png)
-
-```mermaid
-flowchart TB
-  subgraph interfaceLayer [Interface layer]
-    UI[Streamlit classic and assistant]
-  end
-
-  subgraph implementationLayer [Implementation layer]
-    FD[Azure Front Door]
-    APIM[API Management Basic JWT and per-user limit]
-    API[FastAPI JWT and Redis rate limit]
-    SB[Service Bus queues]
-    WK[Container Apps workers]
-    JOB[Scheduled rollup job]
-    PG[(PostgreSQL zone-redundant HA)]
-    BLOB[(Blob storage GZRS)]
-    CACHE[(Redis cache and rate limit)]
-    OBS[App Insights and OpenTelemetry]
-  end
-
-  subgraph intelligenceLayer [Intelligence layer]
-    LG[LangGraph analysis pipeline]
-    CHAT[LangGraph chat agent]
-    STT[gpt-4o-transcribe]
-    LLM[gpt-5-mini structured output]
-    CS[Content Safety Prompt Shields]
-    FEAT[RMS energy and spaCy]
-  end
-
-  UI --> FD --> APIM --> API
-  API --> CHAT
-  API --> PG
-  API --> BLOB
-  API --> SB
-  API --> CACHE
-  CHAT --> CS
-  CHAT --> LLM
-  SB --> WK
-  JOB --> PG
-  WK --> LG
-  LG --> STT
-  LG --> CS
-  LG --> LLM
-  LG --> FEAT
-  WK --> PG
-  WK --> BLOB
-  API --> OBS
-  WK --> OBS
-```
-
-Source: [diagrams/system-architecture.mmd](diagrams/system-architecture.mmd). SVG: [diagrams/system-architecture.svg](diagrams/system-architecture.svg).
-
-The browser talks only to Streamlit. Streamlit calls FastAPI with the bearer token. That keeps auth and file bytes on the server side of the UI.
-
-Classic mode is the library, upload, prompt, rollup, and account pages. Assistant mode is a chat on the same client. The sidebar switches between them. Upload, prompt configuration, and file status in the chat use the existing HTTP APIs. Follow-up questions use `POST /api/v1/chat`.
-
-Assistant keeps a flowchart of the selected file's `stage` (`upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, `saved`). The worker writes that column as each node starts, and `GET /api/v1/files` is what the page polls. A second read, `GET /api/v1/events`, is the live log: blob save, Postgres insert, queue, worker pickup, stage start and finish with duration, save, and errors. The log is limited to the JWT user. `MOCK_STAGE_DELAY_SEC` (1.5 in Compose, 0 in tests) pauses on each step so those updates are visible.
-
-## Request path in Azure
-
-Front Door is the public entry. Each origin is a regional API Management gateway, not the Container App. API Management checks `X-Azure-FDID` against the Front Door profile id, validates the HS256 JWT on authenticated routes, and applies `rate-limit-by-key` with the token's `sub` claim. A limit breach returns 429. Public routes (health, meta, sign-up, login, and the Layer 2 catalog) skip JWT validation and are limited per source IP.
-
-The Container App ingress allowlists API Management's public IP addresses, so the app hostname does not accept traffic from the rest of the internet. API Management Basic cannot be placed in a virtual network, and Front Door Standard cannot private-link to that gateway. The IP allowlist plus the Front Door header is the lock this tier can actually enforce. Private Link would mean API Management Premium and Front Door Premium.
-
-The API applies the same per-user limit again in Redis. That counter is what Compose uses, and it still applies in Azure if a request reaches the app.
-
-## Chat agent
-
-The chat route builds a LangGraph with three nodes: plan, tools, and compose. The tool set is fixed:
-
-| Tool | What it does |
+| Short form | Meaning |
 | --- | --- |
-| `search_files` | The caller's files, filtered by date, duration, or taxonomy text |
-| `get_analysis` | One file's summary, taxonomy, and Layer 2 results |
-| `run_summary` | The same on-demand rollup as `POST /api/v1/summaries` |
+| API | application programming interface |
+| HTTP | Hypertext Transfer Protocol |
+| JSON | JavaScript Object Notation |
+| JWT | JSON Web Token |
+| IP | Internet Protocol address |
+| URL | Uniform Resource Locator |
+| UI | user interface |
+| SQL | Structured Query Language |
+| NoSQL | a store that is not queried with Structured Query Language |
+| DB | database |
+| MCP | Model Context Protocol |
 
-`user_id` comes from the JWT. It is not a tool argument. A file id that belongs to someone else is `not_found`. The tools do not return the raw transcript. Summaries and taxonomy are the data the reply is allowed to use.
+## System
 
-When `LLM_PROVIDER=mock`, the plan node matches the question to one tool with fixed rules, the tools node runs it, and the compose node writes a deterministic reply from the tool result. When `LLM_PROVIDER=azure`, the plan node asks `gpt-5-mini` for one tool call and the compose node asks for a JSON object `{"reply": "..."}`, which Pydantic checks. A schema failure falls back to the same rule-based reply. One tool runs per question.
-
-Streamlit keeps the transcript of the chat in session state and sends at most the last eight turns. The server does not store that history.
-
-## Analysis pipeline
-
-LangGraph is the orchestrator. Duration is measured from the WAV header and samples, not guessed by the model. Transcription uses `gpt-4o-transcribe` when `LLM_PROVIDER=azure`, or a deterministic stand-in when `LLM_PROVIDER=mock`. Content Safety runs before any summary call. If the transcript is blocked, the model is not called.
-
-Speech-to-text uses `gpt-4o-transcribe`. Analysis and the chat agent use `gpt-5-mini`. Both deployments are on one Azure OpenAI resource. Requests to the chat deployment omit `temperature` unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set, because this model rejects an explicit temperature of 0. JSON replies still use `response_format`.
-
-Summaries use one structured call when the transcript fits in `CHUNK_CHARS` (default 4000). Longer transcripts are map-reduced: each chunk returns a partial summary and topic lists, then a reduce call merges them. Topic lists are unioned so a later chunk cannot be dropped. `gpt-5-mini` is asked for JSON that matches a strict JSON schema. The API checks that payload again with Pydantic before it is stored.
-
-Layer 2 runs only the options stored on the user. Those options come from a server-side catalog. RMS and speaking pace are computed in-process. Nouns and adjectives come from spaCy `en_core_web_sm`. Sentiment uses a fixed lexicon. None of these steps accept a free-form system prompt.
-
-![Analysis pipeline](diagrams/analysis-pipeline.png)
+A signed-in request enters through Front Door. The API answers a question, queues an upload, or writes the grouped summaries.
 
 ```mermaid
-flowchart TD
-  startNode[Start] --> prepare[Measure duration]
-  prepare --> transcribe[Transcribe audio]
-  transcribe --> shield[Prompt Shields and content safety]
-  shield -->|blocked| stopNode[Store blocked result]
-  shield -->|allowed| split{Longer than chunk size}
-  split -->|no| single[Single structured summary and taxonomy]
-  split -->|yes| mapNode[Map each chunk]
-  mapNode --> reduceNode[Reduce summaries and union topics]
-  single --> layer2[Layer 2 whitelist options]
-  reduceNode --> layer2
-  layer2 --> validate[Validate JSON schema]
-  validate --> persist[Store transcript and analysis]
-  persist --> stopNode
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "monospace", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 16, "nodeSpacing": 20, "rankSpacing": 40, "htmlLabels": false, "wrappingWidth": 210, "useMaxWidth": false}}}%%
+flowchart LR
+  subgraph interfaceLayer ["Interface"]
+    direction TB
+    UI["Audio Analytics Agent
+The signed-in screen"]
+  end
+  subgraph implementationLayer ["Implementation"]
+    direction TB
+    FD["Azure Front Door
+Picks a healthy region"]
+    APIM["API Management
+Checks the token and the account limit"]
+    API["FastAPI
+Checks the token and the request count"]
+    SB["Service Bus queues
+Holds the upload"]
+    WK["Container Apps workers
+Runs the queued file"]
+    JOB["Scheduled summary job
+Every 15 minutes"]
+    PG["PostgreSQL
+Rows, plus a standby in another zone"]
+    BLOB["Blob storage
+Audio copied across zones and to the paired region"]
+    CACHE["Redis
+The account request count"]
+    OBS["Application Insights
+The trace of the request"]
+    FD --> APIM --> API
+    API --> SB --> WK
+    API --> CACHE
+    API --> PG
+    API --> BLOB
+    API --> OBS
+    WK --> PG
+    WK --> BLOB
+    WK --> OBS
+    JOB --> PG
+  end
+  subgraph intelligenceLayer ["Intelligence"]
+    direction TB
+    CHAT["Microsoft Agent Framework chat
+Answers one question"]
+    LG["Microsoft Agent Framework analysis
+Words, then the summary, then the measures"]
+    STT["gpt-4o-transcribe
+Turns the audio into words"]
+    LLM["gpt-5-mini
+Writes the summary and the reply"]
+    CS["Content Safety
+Blocks unsafe text"]
+    FEAT["Analytics
+Pace, sentiment, word counts, and loudness"]
+    CHAT --> LLM
+    CHAT --> CS
+    LG --> STT
+    LG --> LLM
+    LG --> CS
+    LG --> FEAT
+  end
+  UI --> FD
+  API --> CHAT
+  WK --> LG
 ```
 
-## Local and production brokers
+## This machine
 
-| Concern | Local `docker compose` | Production Terraform |
+What `docker compose up` starts.
+
+```mermaid
+%%{init: {"theme": "base", "htmlLabels": false, "themeVariables": {"fontFamily": "monospace", "fontSize": "15px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 18, "nodeSpacing": 28, "rankSpacing": 72, "wrappingWidth": 480, "useMaxWidth": false}}}%%
+flowchart LR
+  Start --> Compose[docker compose up]
+  Compose --> database@{ shape: cyl, label: "Database
+(A)
+[sql:postgres]
+Holds the Voice database
+and the Langfuse database." }
+  database --> voiceDb@{ shape: cyl, label: "Voice
+(A.1)
+[main db]
+The main database for the app." }
+  voiceDb --> tblUsers@{ shape: bow-rect, label: "Users
+(A.1.1)
+[table:users]
+Stores the account email,
+hashed credentials, and home region." }
+  voiceDb --> tblAudio@{ shape: bow-rect, label: "Audio Files
+(A.1.2)
+[table:audio_files]
+Stores each uploaded recording,
+its length, and processing status." }
+  voiceDb --> tblTranscripts@{ shape: bow-rect, label: "Transcripts
+(A.1.3)
+[table:transcripts]
+Stores the AI-processed transcriptions." }
+  voiceDb --> tblAnalyses@{ shape: bow-rect, label: "Analyses
+(A.1.4)
+[table:analyses]
+Stores the AI-extracted insights
+and analytics for one recording." }
+  voiceDb --> tblPrompts@{ shape: bow-rect, label: "Prompt Configs
+(A.1.5)
+[table:prompt_configs]
+Stores which analytics
+this account turned on." }
+  voiceDb --> tblSummaries@{ shape: bow-rect, label: "Summaries
+(A.1.6)
+[summaries]
+Stores the analysis aggregation
+of those AI summaries, for all of
+the account's completed recordings,
+or grouped by topic, day, week,
+month, or sentiment." }
+  voiceDb --> tblEvents@{ shape: bow-rect, label: "File Events
+(A.1.7)
+[table:file_events]
+Stores the file processing logs." }
+  database --> lfDb@{ shape: cyl, label: "langfuse
+(A.2)
+[db:langfuse]
+Stores Langfuse's projects,
+users, and settings." }
+  Compose --> queue["Job Queue
+(B)
+[nosql:redis]"]
+  Compose --> storage["Storage
+(C)
+[blob:azurite]"]
+  Compose --> mcp["MCP Server
+(D)
+[mcp.server.mcpserver]"]
+  Compose --> api["Audio Analytics
+(E)
+[api:fastapi]"]
+  Compose --> processor["Processor
+(F)
+[worker:celery]"]
+  Compose --> ui["UI
+(G)
+[web:streamlit]"]
+  Compose --> langfuse["Langfuse
+(H)
+[tracing:langfuse]"]
+  langfuse --> lfWeb["Web
+(H.1)
+[langfuse:web]"]
+  langfuse --> lfWorker["Worker
+(H.2)
+[langfuse:worker]"]
+  langfuse --> lfClick["ClickHouse
+(H.3)
+[clickhouse]"]
+  langfuse --> lfMinio["MinIO
+(H.4)
+[minio]"]
+  langfuse --> lfInit["DB Init
+(H.5)
+[langfuse:db-init]"]
+```
+
+## One recording
+
+One saved file is measured, transcribed, checked, summarized, then measured for pace, sentiment, word counts, and loudness.
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "monospace", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 16, "nodeSpacing": 28, "rankSpacing": 44, "htmlLabels": false, "wrappingWidth": 260, "useMaxWidth": false}}}%%
+flowchart TD
+  START["Upload saved"] --> prepare["prepare
+measure_duration()"]
+  prepare --> transcribe["transcribe
+fetch_audio_via_mcp() when that address is set"]
+  transcribe --> speech["transcribe()
+gpt-4o-transcribe turns the audio into words"]
+  speech --> shield["shield
+Content Safety"]
+  shield -->|blocked| stopped["Stopped
+The words are kept"]
+  shield -->|allowed| insights["Summary
+One recording"]
+  insights -->|short| shorty["summarize_and_classify()
+gpt-5-mini"]
+  insights -->|long| longy["summarize_chunk(), then reduce_summaries()
+gpt-5-mini"]
+  shorty --> analytics["Analytics
+rms_features(window_ms), pos_counts(top_n), speaking_pace(), sentiment_lexicon()"]
+  longy --> analytics
+  analytics --> saved["Saved"]
+```
+
+## One question
+
+| | Azure | Mock |
 | --- | --- | --- |
-| API | Uvicorn container | Container App, min 2, max 8 |
-| Queue | Redis + Celery, worker started with beat | Service Bus queues and a Container App worker |
-| Schedule | Celery beat inside the worker | Container Apps Job, cron `*/15 * * * *` |
-| Objects | Azurite | Azure Blob, GZRS, private container |
-| Database | Postgres 16 | Flexible Server 16, zone-redundant HA, geo-redundant backups, hash partitions |
-| Models | Mock providers, no keys | Azure OpenAI and Content Safety |
-| Edge | none | Front Door to API Management Basic, then the Container App |
-| Rate limit | Redis in Compose | API Management per `sub`, and Redis again in the API |
-| Traces | OpenTelemetry off unless configured | OpenTelemetry on; Langfuse when keys exist |
+| Plan | `gpt-5-mini` | Fixed rules |
+| Reply | `gpt-5-mini` writes every reply, including greetings, help, and tool errors. Fixed text only when that call fails | Fixed rules |
+| Voice questions | Gender, age, accent, emotion, or who is speaking call `profile_speaker` on the newest recording | Same |
+| Temperature | Empty unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set | |
 
-`ANALYSIS_MODE=inline` runs the pipeline in the API process. Tests use that mode. Compose uses `celery`. Production sets `BROKER=servicebus`, and the API publishes `{kind, file_id, user_id}` to the `transcription` queue. The worker process `python -m app.jobs.service_bus_worker` consumes `transcription`, `llm-layer1`, `llm-layer2`, and `rollup`.
+The steps that answer one question.
 
-The four queues are real infrastructure. Today a message on any analysis queue runs the full pipeline, which is idempotent. Splitting transcription and LLM into separate consumers is a scale step, not a schema change. See [scaling.md](scaling.md).
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "monospace", "fontSize": "14px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"curve": "linear", "padding": 16, "nodeSpacing": 32, "rankSpacing": 48, "htmlLabels": false, "wrappingWidth": 240, "useMaxWidth": false}}}%%
+flowchart TD
+  START["Question"] --> plan["plan
+Chooses one tool, or none"]
+  plan -->|search_files| search["search_files
+No model"]
+  plan -->|get_analysis| opened["get_analysis
+No model"]
+  plan -->|"run_summary(group_by)"| summary["summarize_group(summaries)
+One summary for the group"]
+  plan -->|profile_speaker| profile["profile_speaker
+Voice traits from the audio"]
+  plan -->|none| compose["compose
+Writes every reply"]
+  search --> compose
+  opened --> compose
+  summary --> compose
+  profile --> compose
+  compose -->|"gpt-5-mini. Fixed text if that call fails"| END["Reply"]
+```
 
-## Observability
+## Call path
 
-OpenTelemetry is initialized when `OTEL_ENABLED=true`. If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, spans go to that OTLP HTTP endpoint. FastAPI is instrumented, and each pipeline node opens a span.
+Which file calls the next.
 
-Langfuse receives a generation observation for map, reduce, single-shot, and rollup calls when both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set. Missing keys disable it. A Langfuse export error is logged and does not fail the analysis.
+```mermaid
+%%{init: {"theme": "base", "htmlLabels": true, "securityLevel": "antiscript", "themeVariables": {"fontFamily": "monospace", "fontSize": "15px", "primaryColor": "#ffffff", "primaryTextColor": "#0f172a", "primaryBorderColor": "#0f172a", "lineColor": "#0f172a", "background": "#ffffff"}, "flowchart": {"htmlLabels": true, "curve": "linear", "padding": 18, "nodeSpacing": 28, "rankSpacing": 72, "wrappingWidth": 480, "useMaxWidth": false}}}%%
+flowchart LR
+  streamlit["<span style='font-weight:normal'>streamlit_app.py</span> | <b>render_assistant()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/streamlit_app.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Opens the assistant.</span></i>"] --> assistant["<span style='font-weight:normal'>assistant_ui.py</span> | <b>upload()</b>, <b>chat()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/assistant_ui.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends what you picked.</span></i>"]
+  assistant --> client["<span style='font-weight:normal'>api_client.py</span><br><span style='font-size:11px;color:rgb(148,163,184)'>frontend/api_client.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Sends the request.</span></i>"]
+  client -->|"upload()"| files["<span style='font-weight:normal'>files.py</span> | <b>upload_files()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/api/routes/files.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Saves the recording.</span></i>"]
+  client -->|"chat()"| chat
+  files -->|"enqueue_analysis()"| tasks
+  files --> service["<span style='font-weight:normal'>analysis/service.py</span> | <b>run_file_analysis()</b>, <b>run_graph()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/service.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Runs the analysis.</span></i>"]
+  service --> graphPy["<span style='font-weight:normal'>analysis/graph.py</span> | <b>run_graph()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/graph.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Microsoft Agent Framework works through one recording.<br>First the words, then the summary, then the pace and sentiment.</span></i>"]
+  tasks["<span style='font-weight:normal'>jobs/tasks.py</span> | <b>analyze_file_task()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/jobs/tasks.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Runs the queued job.</span></i>"] --> service
+  chat["<span style='font-weight:normal'>chat.py</span> | <b>chat()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/api/routes/chat.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Answers the question.</span></i>"] --> agent["<span style='font-weight:normal'>chat/agent.py</span> | <b>run_chat_agent()</b>, <b>execute_tool()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/chat/agent.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Microsoft Agent Framework answers one question<br>about this account's recordings.</span></i>"]
+  agent --> tools["<span style='font-weight:normal'>chat/tools.py</span> | <b>run_summary(group_by)</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/chat/tools.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Asks for a summary.</span></i>"]
+  tools --> summary["<span style='font-weight:normal'>summarize_group.py</span> | <b>summarize_group(summaries)</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/summarize_group.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Writes one summary for the group.</span></i>"]
+  graphPy --> mcp["<span style='font-weight:normal'>mcp_audio.py</span> | <b>fetch_audio_via_mcp()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/mcp_audio.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Reads the audio.</span></i>"]
+  graphPy --> intelligence["<span style='font-weight:normal'>intelligence.py</span> | <b>get_intelligence()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/providers/intelligence.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Azure OpenAI.<br>Transcribes the audio and writes the insights.</span></i>"]
+  graphPy --> layer2["<span style='display:inline-block;width:19ch;text-align:right;font-weight:400'>audio_features.py</span> | <b>rms_features(window_ms)</b><br><span style='display:inline-block;width:19ch;text-align:right;font-weight:400'>spacy_features.py</span> | <b>pos_counts(top_n)</b><br><span style='display:inline-block;width:19ch;text-align:right;font-weight:400'></span> | <b>speaking_pace()</b><br><span style='display:inline-block;width:19ch;text-align:right;font-weight:400'></span> | <b>sentiment_lexicon()</b><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/audio_features.py</span><br><span style='font-size:11px;color:rgb(148,163,184)'>backend/app/analysis/spacy_features.py</span><br><i><span style='font-size:11px;color:rgb(148,163,184);font-family:Courier'>Analytics.<br>Pace, sentiment, word counts, and loudness.</span></i>"]
+```
 
-Terraform also creates Log Analytics and Application Insights per region. Point the OTLP endpoint at a collector that forwards to Azure Monitor if you want one trace pipeline for API spans and model spans.
+## Local and cloud
+
+| | Local | Cloud |
+| --- | --- | --- |
+| Interface | Uvicorn | Container App, 2 copies growing to 8 |
+| Queue | Redis and Celery | Service Bus |
+| Schedule | Celery beat | Every 15 minutes |
+| Files | Azurite, then `fetch_audio` when `MCP_AUDIO_URL` is set | Blob. The bytes are already loaded |
+| Database | PostgreSQL 16 | One server per region, plus a standby in another zone |
+| Models | Mock | Azure OpenAI and Content Safety |
+| Front door | none on this machine | Front Door, then API Management |
+| Work | Inline in tests. Celery in Compose | One worker copy. The ceiling is 20 and no rule adds a copy |
+| Account limit | 120 a minute when the limiter is on | 120 a minute |
+| Trace | Langfuse when both keys are set | Same send. A failed send leaves the file result in place |
+
+[Scaling](scaling.md)

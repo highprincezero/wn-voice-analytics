@@ -28,3 +28,9 @@ DEMO_SCRIPT.md
 PLAN_STATUS.md
 SESSION_RECAP.md
 docker-compose.override.yml
+# Recording scripts read during the demo. Local only.
+FULL_DEMO_SCRIPT.md
+RECORDING_01_SCRIPT.md
+RECORDING_02_SCRIPT.md
+# pgAdmin server list used by docker-compose.override.yml. Local only.
+.local-tools/

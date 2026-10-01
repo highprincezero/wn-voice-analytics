@@ -1,104 +1,148 @@
-> Applicable only for cloud provisioning. This file is used only when deployed to the cloud with a multi-region deployment.
-
 # Scaling
 
-Target: **N regions**, each with **10,000 registered users** and **2,000 concurrent users**. Regions do not share audio or analysis rows. A user has one home region.
+How the Azure deployment handles one request, and how many copies of each part run.
 
-![Scaling topology](diagrams/scaling-topology.png)
+## Names
+
+| Short form | Meaning |
+| --- | --- |
+| API | application programming interface |
+| HTTP | Hypertext Transfer Protocol |
+| IP | Internet Protocol address |
+| JSON | JavaScript Object Notation |
+| JWT | JSON Web Token |
+| GiB | gibibyte |
+| GB | gigabyte |
+| vCPU | virtual central processing unit |
+| MB | megabyte |
+| llm | large language model. `llm-layer1` is Insights. `llm-layer2` is Analytics |
+
+## Request 001
+
+One signed-in upload, from the front door to the stored file.
+
+```mermaid
+flowchart LR
+  id001[001] --> fd[Front Door]
+  fd -->|healthy origin priority 1 weight 1000| apim[API Management]
+  apim -->|missing Front Door identifier| deny[403]
+  apim -->|account over 120 a minute| limited[429]
+  apim -->|JSON Web Token subject| api[Application interface]
+  api --> redis[(Redis count)]
+  api -->|upload| q[transcription queue]
+  q --> worker[Worker]
+  worker --> models[gpt-4o-transcribe and gpt-5-mini]
+  worker --> store[(PostgreSQL and Blob)]
+```
+
+## Where the account is stored
+
+Which region's database and file store hold the account.
 
 ```mermaid
 flowchart TB
-  users[Clients] --> fd[Azure Front Door]
-  fd --> r1[Region 1]
-  fd --> rn[Region N]
-
-  subgraph regionBox [Each region]
-    apim[API Management Basic per-user limit]
-    api[API replicas min 2 max 8]
-    chat[Chat agent]
-    queues[Queues transcription llm layer2 rollup]
-    workers[Service Bus workers]
-    rollup[Cron rollup job]
-    db[(Postgres zone-redundant HA)]
-    blob[(Blob GZRS under user id)]
-    cache[(Redis Standard rate limit)]
-    oai[Azure OpenAI and Content Safety]
-    obs[Log Analytics and Langfuse]
-  end
-
-  r1 --> apim
-  rn --> apim
-  apim --> api
-  api --> chat
-  api --> cache
-  api --> queues
-  queues --> workers
-  workers --> db
-  workers --> blob
-  workers --> oai
-  rollup --> db
-  api --> obs
-  workers --> obs
+  fd[Front Door] --> r1[East US]
+  fd --> rn[West Europe]
+  a[Account] -->|home_region set at sign-up| r1
+  b[Account] -->|home_region set at sign-up| rn
+  r1 --> d1[(Own PostgreSQL and Blob)]
+  rn --> d2[(Own PostgreSQL and Blob)]
 ```
 
-Terraform takes `regions` as a list. The length of that list is N. Each element is a `region_stack` module: network, Postgres, blob storage, Redis, Service Bus, Container Apps, a cron job, API Management, Key Vault, Azure OpenAI, and Content Safety. Front Door sits in a global resource group. Each origin is that region's API Management gateway. API Management forwards to the regional Container App.
+## How a release is placed
 
-## Planning case
+Where the built image is started, and how a call reaches it.
 
-These are assumptions, not measurements. Change them and the formulas still apply.
+```mermaid
+flowchart LR
+  APP[Application] --> IMG[Container image] --> ACR[Azure Container Registry]
+  ACR --> API[Interface]
+  ACR --> WK[Workers]
+  ACR --> JOB[Summaries job]
+  FD[Front Door] --> APIM[API Management] --> EP[Ingress]
+  API --> EP
+```
 
-| Input | Symbol | Value |
+## Application interface
+
+When a copy is added, and when the count returns to 2.
+
+```mermaid
+flowchart LR
+  a["2 copies. 1 virtual processor. 2 gibibytes"] --> b["Requests in 15 seconds, divided by 15"]
+  b -->|above 10| d[Add 1 copy]
+  d --> b
+  d --> e[Stop at 8]
+  b -->|10 or under| f[Down to 2]
+```
+
+## Worker
+
+How many worker copies run.
+
+```mermaid
+flowchart LR
+  one["1 copy. 1 virtual processor. 2 gibibytes"] --> stay[Stays at 1]
+  stay --> cap[Ceiling 20. No add rule]
+```
+
+## Summaries
+
+Who writes the grouped summaries, and where they land.
+
+```mermaid
+flowchart LR
+  api["Interface summarize_group"] --> db[(PostgreSQL)]
+  job["Every 15 minutes. 0.5 processor. 1 gibibyte"] --> db
+```
+
+## Fixed size, each region
+
+| Component | Copies | Size |
 | --- | --- | --- |
-| Registered users per region | R | 10,000 |
-| Concurrent users per region | C | 2,000 |
-| Regions | N | variable |
-| Audio files per registered user per day | F | 1 |
-| Share of a day's uploads in a 4 hour peak | P | 0.80 |
-| Mean audio duration | D | 3 minutes |
-| Mean object size | S | 2 MB |
-| Transcription wall clock | T_stt | 15 s |
-| LLM wall clock, about two calls | T_llm | 4 s |
-| Layer 2 CPU | T_l2 | 1 s |
+| API Management | 1 | Basic. 120 a minute on the account. 60 a minute on the IP address |
+| Redis | 1 | Standard C1. 1 GB |
+| Service Bus | 1 | Standard. transcription, llm-layer1, llm-layer2, rollup |
+| PostgreSQL | 1 plus a standby | version 16, 4 vCPU, 16 GiB, 128 GiB |
+| Blob | 1 | Standard. Copied across zones and to the paired region |
+| Front Door | 1 | Standard. Health check `GET /api/v1/health` every 120 seconds |
+| gpt-4o-transcribe | 1 | 30 thousand tokens a minute |
+| gpt-5-mini | 1 | 80 thousand tokens a minute |
+| Content Safety | 1 | S0 |
 
-Peak file rate:
+## Rows
 
-```text
-files_per_day        = R * F = 10,000
-peak_files_per_sec   = files_per_day * P / (4 * 3600) = 0.56
+How one account's rows are divided.
+
+```mermaid
+flowchart TB
+  account[Account] --> usersTable[users one table]
+  account --> uid[user_id]
+  uid --> parts["16 pieces of each table. Same account, same piece."]
+  parts --> audio_files
+  parts --> transcripts
+  parts --> analyses
+  parts --> prompt_configs
+  parts --> summaries[Summaries]
+  parts --> file_events
+  uid --> keys["users/user_id/audio transcripts analysis"]
 ```
 
-In-flight work if one worker holds the whole pipeline:
+## Plan numbers, each region
 
-```text
-in_flight = 0.56 * (15 + 4 + 1) ≈ 11 tasks
-```
-
-That fits in a handful of worker replicas. The expensive wait is the transcription HTTP call, so production should not pin a CPU core to it.
-
-## Request rate
-
-Assume the 2,000 concurrent users split like this during the busy hour:
-
-| Activity | Share | Interval | Requests/s |
-| --- | --- | --- | --- |
-| Library and polling | 70% | 10 s | 140 |
-| Idle session | 20% | 60 s | 6.7 |
-| Upload or waiting on analysis | 10% | 5 s | 40 |
-| Total |  |  | about 187 |
-
-FastAPI is async. List queries filter on `user_id` first, so Postgres prunes to one of 16 hash partitions. Two API replicas cover this rate and a deploy. The module sets min 2 and max 8.
-
-Upload bandwidth at peak, if the 0.56 files/s are 2 MB each:
-
-```text
-0.56 * 2 MB ≈ 1.1 MB/s ≈ 9 Mbps
-```
-
-Blob ingress is not the bottleneck at this planning case. Playback is smaller still: 200 concurrent listeners at 128 kbps is about 26 Mbps.
+| | |
+| --- | --- |
+| Accounts | 10,000 |
+| Active at once | about 2,000 |
+| Peak uploads | about 0.56 files a second |
+| Busy-hour requests | about 187 a second (most sessions poll every 10 seconds) |
+| Transcription | about 900,000 minutes a month |
+| Models | `gpt-4o-transcribe` and `gpt-5-mini` |
+| Move an account | no automatic move |
 
 ## Workers and context limits
 
-`CHUNK_CHARS` defaults to 4000 characters. A transcript under that size is one structured call to `gpt-5-mini`. A longer transcript is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent. Topics found on any chunk are unioned back in, so the reduce step cannot drop them. Duration is computed locally and is not part of the model context.
+`CHUNK_CHARS` defaults to 4000 characters. A transcript under that size is one structured call to `gpt-5-mini`. A longer transcript goes through map-reduce: it is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent. Topics found on any chunk are unioned back in, so the reduce step cannot drop them. Duration is computed locally and is not part of the model context.
 
 Queues in each region:
 
@@ -118,7 +162,14 @@ The worker in this POC runs the full pipeline for any analysis message. That is 
 | Layer 2, 1 s CPU | under 1 core | same worker pool today |
 | API | 187 rps | min 2, max 8 |
 
-The rollup job is a Container Apps Job on `*/15 * * * *`. It also runs when a user asks for it in the UI. The UI path calls the same function in the API process so the screen can show the result. The cron path calls `python -m app.jobs.run_scheduled_rollup`. A user is skipped when a scheduled rollup for `group_by=user` already exists inside the interval.
+### When summaries run
+
+Grouped summaries are triggered two ways, and both call the same `run_rollup` function:
+
+- **Scheduled, every 15 minutes.** A Container Apps Job on `*/15 * * * *` calls `python -m app.jobs.run_scheduled_rollup`. It writes a `group_by=user` summary for each account with completed analyses, and skips an account that already has a scheduled summary inside the interval. This keeps an up-to-date overview ready without anyone waiting for it, and the 15-minute cadence bounds the model cost to at most one scheduled summary per account per interval.
+- **On demand.** When a user asks in the UI or the chat, the API runs the summary in-process so the screen can show the result right away. `group_by` is one of `user`, `taxonomy_label`, `day`, `week`, `month`, or `sentiment`, with an optional time range.
+
+Each group is summarized with the same chunk budget: if the summaries in a group add up to more than `CHUNK_CHARS`, they are split in half and summarized recursively, so one call stays inside the model context.
 
 ## Data plane per region
 
@@ -128,40 +179,26 @@ The rollup job is a Container Apps Job on `*/15 * * * *`. It also runs when a us
 | Blob | GZRS, private container, versioning on | Zone and geo copies of objects. Reads stay in the home region until a storage failover is started. 10,000 * 2 MB = 20 GB/day. |
 | Service Bus | Standard, four queues | 0.56 messages/s does not need Premium. Standard is not zone redundant. Premium is the zone and private-network step, and it is a large fixed cost at this rate. |
 | Redis | Standard C1 | Rate-limit counter and a short cache. It is not the production queue. Standard is not zone redundant. Premium Redis is not used for the same cost reason. |
-| Azure OpenAI | `gpt-4o-transcribe` and `gpt-5-mini`, Global Standard | One resource. `gpt-4o-transcribe` is speech-to-text. `gpt-5-mini` is analysis and chat. Hosted API. Self-hosting a transcriber would remove the per-minute fee and add GPU capacity we do not need at 0.56 files/s. |
-| Content Safety | S0 | Prompt Shields and category analysis in front of the model and on chat input |
+| Azure OpenAI models | `gpt-4o-transcribe` and `gpt-5-mini`, Global Standard, deployed in Microsoft Foundry | Microsoft Foundry is the hosting environment for both model deployments. `gpt-4o-transcribe` is speech-to-text. `gpt-5-mini` is analysis and chat. Hosted API. Self-hosting a transcriber would remove the per-minute fee and add GPU capacity we do not need at 0.56 files/s. |
+| Content Safety | S0 | Prompt Shields and category analysis on every transcript, on saved prompt choices, and on chat input |
 | Front Door | One global Standard profile | Entry in front of API Management. The app stores `home_region` and should stick a user to that region. |
 | Container Apps | Zone-redundant environment, consumption, apps subnet `/23` | Replicas can land in more than one zone. `/23` is the minimum for a consumption-only environment. |
-| API Management | Basic, one unit | `rate-limit-by-key` is supported on Basic and not on Consumption. See the rate-limit section. |
+| API Management | Basic, one unit | `rate-limit-by-key` is supported on Basic and not on Consumption. See the trade-offs below. |
 
 Global identity is a small lookup, not a copy of the audio. Sign-up writes `email -> user_id -> home_region` in the region the user was routed to, and the email unique index lives in that region's `users` table. A second region must not create the same email. The practical approach is a tiny global directory (email, user id, home region) in the primary region, replicated read-only, or an external identity provider. The POC keeps that column and does not build the global directory.
 
 Multiply every regional number by N. There is no cross-region join and no cross-region blob read on the request path.
 
-## Cost notes
+## Why Azure
 
-These are order-of-magnitude illustrations for **one region** at the planning case. Recheck the Azure price sheet before budgeting. Prices move, and transcription minutes dominate.
-
-| Item | Rough monthly shape |
-| --- | --- |
-| Transcription | 10,000 files/day * 3 min * 30 days = 900,000 minutes. At a few tenths of a cent to about a cent per minute, this is the largest line, on the order of several thousand dollars. |
-| `gpt-5-mini` | About 2 calls * 2k tokens * 10k files * 30 days. Mini pricing makes this hundreds of dollars, not thousands, unless map-reduce expands long files. |
-| Content Safety | 300k text records/month. Often on the order of a few hundred dollars. |
-| Postgres D4ds with zone-redundant HA | About twice the single-server compute, because the standby is a second server. A few hundred dollars becomes closer to the high hundreds. Geo-redundant backup adds paired-region backup storage on top. |
-| Container Apps | Low hundreds at this replica count. Zone redundancy on the environment does not by itself add a second SKU. |
-| Blob, 600 GB GZRS | Higher than ZRS, still tens of dollars plus operations at this size. Recheck GZRS rates. |
-| Service Bus Standard | Low tens of dollars. Premium is hundreds and is not required for this rate. Premium is also the SKU that is zone redundant. |
-| API Management Basic | On the order of $150 per region per month for one unit. Consumption has no fixed fee but cannot key a rate limit on `sub`. Two regions are still small next to transcription. |
-| Front Door Standard + Redis C1 + App Insights | Low hundreds combined. Redis Premium, which would add zones, is a separate jump and is not in this module. |
-| Langfuse | Optional, separate from Azure. |
-
-For N regions, multiply the regional lines. Front Door stays one profile. The global directory, if added, is tiny next to transcription.
-
-The main cost lever is minutes of audio sent to `gpt-4o-transcribe`. Skipping silence, rejecting very long files, and keeping the planning case at one file per user per day matter more than the API replica count.
+- The models the product depends on, `gpt-4o-transcribe` and `gpt-5-mini`, are available as managed deployments in Microsoft Foundry, next to Azure AI Content Safety (Prompt Shields). Speech-to-text, analysis, and the safety check stay inside one cloud and one region per user.
+- Every other piece has a managed Azure service with zone redundancy and regional deployment: Postgres Flexible Server, GZRS Blob, Service Bus, Container Apps, API Management, and Front Door. One Terraform module (`region_stack`) can stamp out a full region, so adding a region is adding an entry to the `regions` list.
+- Data residency follows from the home-region model: a user's audio, transcripts, and analyses live in that region's database and storage account.
 
 ## Trade-offs
 
-- Hosted Azure OpenAI instead of a self-hosted model. The POC has to run with no GPU, and 0.56 files/s does not justify a transcription cluster. The cost is per minute and the quota is regional.
+- Hosted models instead of self-hosted ones. Both models are deployed in Microsoft Foundry. The POC has to run with no GPU, and 0.56 files/s does not justify a transcription cluster. The cost is per minute and the quota is regional.
+- `gpt-4o-transcribe` for speech-to-text because it is a hosted transcription model with good accuracy on conversational audio and no infrastructure to run. `gpt-5-mini` for summaries, taxonomy, and chat because it supports strict JSON-schema output and is cheap enough per call that map-reduce on long transcripts stays in the hundreds of dollars a month, not thousands.
 - Hash partitions are fixed at 16. That is enough for 10k users in one database. Raising the modulus later means a new partitioned table and a copy, so 16 is chosen up front.
 - The users table is not partitioned, so email stays unique. See [data-model.md](data-model.md).
 - One worker function instead of three stage consumers. The queues exist so the split does not need a new contract. Doing it now would add failure states between stages for a rate that fits in one pool.
@@ -170,15 +207,4 @@ The main cost lever is minutes of audio sent to `gpt-4o-transcribe`. Skipping si
 - API Management Basic instead of Consumption. Microsoft's policy reference lists `rate-limit-by-key` as supported on the classic and v2 gateways and not on Consumption. `rate-limit` on Consumption is per subscription key, and this API does not use subscription keys. Developer supports the per-key policy and has no SLA. Basic is the smallest tier with an SLA that can key the counter on `sub`. One Basic unit is sized well above 187 requests/s. Standard is several times the Basic price without a feature this rate needs. Premium is the tier with zone redundancy and virtual-network injection. That cost is not justified for a gateway in front of 187 requests/s, so API Management is not zone redundant.
 - The FastAPI limiter is the same 120 requests per 60 seconds per user, stored in Redis. API Management is the edge. Redis is the check that still runs in Compose and that still runs if a request reaches the container. Health, sign-up, login, meta, and the prompt catalog are not counted. Public API Management routes are limited per source IP instead, at 60 per 60 seconds.
 - The Container App ingress allows only API Management's public IPs. API Management requires `X-Azure-FDID` to match the Front Door profile before it validates the JWT. Basic cannot join a virtual network, and Front Door Standard cannot private-link to API Management. A private path would be Front Door Premium plus API Management Premium. This module does not take that step.
-- Zone redundancy that is turned on: Postgres Flexible Server (zones 1 and 2, with geo-redundant backups, which this pair of regions supports together with zone-redundant HA), the Container Apps environment, and GZRS blob. Zone redundancy that is documented and not turned on: Service Bus Standard, Redis Standard, and API Management Basic. Each of those needs Premium for zones. Cross-region replication of a user's rows is also not turned on. Each user still has one home region, and a request does not read another region's database or blobs.
-
-## Future work
-
-- Split the pipeline across the four queues and scale them independently.
-- ffmpeg normalization so mp3 and m4a get real duration and RMS.
-- A global email directory in front of regional sign-up.
-- Private endpoints for blob, Service Bus, and OpenAI, which for API Management means leaving Basic.
-- A live cross-region copy of each user's rows, and a failover runbook on top of geo-restore and GZRS. The backups exist. The failover automation does not.
-- Premium Service Bus, Premium Redis, and Premium API Management if those three services need availability zones.
-- Evaluation set for summary and taxonomy quality.
-- Retention and deletion for blocked transcripts.
+- Zone redundancy that is turned on: Postgres Flexible Server (zones 1 and 2, with geo-redundant backups), the Container Apps environment, and GZRS blob. Zone redundancy that is documented and not turned on: Service Bus Standard, Redis Standard, and API Management Basic. Each of those needs Premium for zones. Cross-region replication of a user's rows is also not turned on.

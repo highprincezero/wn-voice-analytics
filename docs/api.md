@@ -1,225 +1,98 @@
-# API reference
+# API
 
-Base URL locally: `http://localhost:8000`. All routes below are under `/api/v1` except `GET /`.
+API means application programming interface.
 
-Authenticated routes require:
+`http://localhost:8000` under `/api/v1`. This machine uses port 8001.
 
-```http
-Authorization: Bearer <access_token>
-```
+## Names
 
-Errors use `{"detail": "..."}`. Validation errors use FastAPI's default list shape.
-
-## Auth
-
-### POST /api/v1/auth/signup
-
-Body: `{"email": "ada@example.com", "password": "correct-horse"}`.
-
-Password length is 8 to 72 bytes. Email is stored lowercased. `201` returns:
-
-```json
-{
-  "access_token": "<jwt>",
-  "token_type": "bearer",
-  "user_id": "<uuid>",
-  "email": "ada@example.com"
-}
-```
-
-`409` if the email exists. `400` if the password is rejected.
-
-### POST /api/v1/auth/login
-
-Same body. `200` with the same token object. `401` on a bad email or password.
-
-### GET /api/v1/auth/me
-
-```json
-{
-  "id": "<uuid>",
-  "email": "ada@example.com",
-  "home_region": "local",
-  "created_at": "2026-09-28T12:00:00"
-}
-```
-
-## Files
-
-### POST /api/v1/files
-
-`multipart/form-data`, field name `files`, one or more parts, at most 10. Each part at most `MAX_UPLOAD_BYTES` (20 MB). Extensions: `wav`, `mp3`, `m4a`, `ogg`, `flac`.
-
-`201`:
-
-```json
-{ "items": [ { "id": "<uuid>", "status": "uploaded", "storage_key": "users/<user_id>/audio/<file_id>.wav" } ] }
-```
-
-Each item also includes `original_filename`, `content_type`, `byte_size`, `duration_sec`, `created_at`, `error_message`, `stage`, `skipped_stages`, and, once analysis has finished in the same request (`ANALYSIS_MODE=inline`), `summary`, `taxonomy`, `layer2`, `summary_strategy`, `provider`, and `block_reason`.
-
-`stage` is the pipeline step the worker last entered: `upload`, `queued`, `transcribe`, `safety`, `layer1`, `layer2`, or `saved`. `status` stays `uploaded`, `processing`, `completed`, `blocked`, or `failed`. A blocked file finishes at `saved` with `skipped_stages` of `layer1` and `layer2`. A failure leaves `stage` on the step that raised.
-
-The object is written, the row is committed, then analysis is queued. With Celery, the first response usually still says `uploaded` or `queued`. `MOCK_STAGE_DELAY_SEC` pauses at each step so a client can poll the change. Tests and Azure leave it at 0.
-
-### GET /api/v1/files
-
-Query parameters, all optional:
-
-| Name | Meaning |
+| Short form | Meaning |
 | --- | --- |
-| `date_from` | ISO timestamp, inclusive |
-| `date_to` | ISO timestamp, inclusive |
-| `min_duration` | Seconds |
-| `max_duration` | Seconds |
-| `taxonomy` | Case-insensitive substring of any taxonomy list |
-| `custom` | `name:value`. Names: `sentiment`, `adjective_count`, `noun_count`, `wpm`, `rms_mean` |
-| `limit` | 1 to 200, default 50 |
-| `offset` | Default 0 |
+| HTTP | Hypertext Transfer Protocol |
+| JSON | JavaScript Object Notation |
+| URL | Uniform Resource Locator |
+| MB | megabyte |
+| ID | identifier |
+| Bearer | sign-in token on `Authorization` |
+| 201 | created |
+| 401 | the password did not match |
+| 400 | the request was rejected |
+| 404 | missing, including another account's file |
+| 409 | that email already exists |
+| 429 | over 120 calls in one minute |
+| GET, POST, PUT, DELETE | the HTTP methods listed on each route |
 
-`custom` sentiment values are `positive`, `neutral`, `negative`. Numeric filters are greater-than-or-equal and must sit in the catalog range.
+Authenticated routes send `Authorization: Bearer <token>`. Errors look like `{"detail": "..."}`.
 
-Response: `{"items": [...], "total": <int>}`. `total` is the filtered count before limit and offset. Rows always belong to the caller.
+## Routes
 
-### GET /api/v1/files/{file_id}
+| Method | Path | Auth | What it does |
+| --- | --- | --- | --- |
+| POST | `/auth/signup` | no | Create an account and return a token |
+| POST | `/auth/login` | no | Return a token |
+| GET | `/auth/me` | yes | This account |
+| POST | `/files` | yes | Upload. Field name `files`, up to 10 |
+| GET | `/files` | yes | List this account's recordings |
+| GET | `/files/{id}` | yes | One recording, plus the transcript |
+| GET | `/files/{id}/audio` | yes | The audio bytes |
+| POST | `/files/{id}/analyze` | yes | Run it again |
+| DELETE | `/files/{id}` | yes | Delete the file and its rows |
+| GET | `/events` | yes | This account's processing log, newest first |
+| GET | `/prompts/options` | no | The Analytics catalog |
+| GET | `/prompts/config` | yes | What this account turned on |
+| PUT | `/prompts/config` | yes | Replace that list |
+| POST | `/summaries` | yes | Group the completed summaries |
+| GET | `/summaries` | yes | The latest summaries, up to 50 |
+| POST | `/chat` | yes | One question. Saves the turn on this account |
+| GET | `/chat/session` | yes | The latest chat and its saved turns |
+| POST | `/chat/session` | yes | Start an empty chat |
+| GET | `/health` | no | Liveness |
+| GET | `/health/ready` | no | Database check |
+| GET | `/meta` | no | Which providers are on |
+| GET | `/` | no | Service name |
 
-Same object as a list item, plus `transcript` and `transcript_key`. `404` if the id is missing or belongs to someone else.
+The order of work after an upload.
 
-### GET /api/v1/files/{file_id}/audio
-
-Raw bytes, `Content-Type` from the stored file.
-
-### POST /api/v1/files/{file_id}/analyze
-
-Sets status back to `uploaded` and queues the pipeline again. Returns the file object.
-
-### DELETE /api/v1/files/{file_id}
-
-`204`. Deletes the audio, transcript, and analysis blobs, then the row. Child rows, including the file's events, cascade.
-
-### GET /api/v1/events
-
-Newest first, at most 300. Optional `file_id` limits the list to one of the caller's files. Another user's id returns an empty list.
-
-```json
-{
-  "items": [
-    {
-      "id": "<uuid>",
-      "file_id": "<uuid>",
-      "filename": "sample_call.wav",
-      "message": "Transcribe finished (1400 ms)",
-      "stage": "transcribe",
-      "level": "info",
-      "duration_ms": 1400,
-      "created_at": "2026-09-28T12:00:01"
-    }
-  ]
-}
+```mermaid
+flowchart LR
+  upload --> queued --> transcribe --> safety --> layer1[Insights] --> layer2[Analytics] --> saved
 ```
 
-`level` is `info` or `error`. `duration_ms` is set on stage finish lines. Messages cover the blob write, the Postgres insert, the queue (Celery task id, Service Bus, or inline), worker pickup, each stage start and finish, skipped stages, the saved result, and errors or retries. Transcript text is not copied into the log.
+How the recording status ends.
 
-## Prompts
-
-### GET /api/v1/prompts/options
-
-No auth. Returns `{ "options": [ { "id", "label", "description", "params" } ] }`.
-
-Option ids: `rms_energy` (`window_ms` enum 100, 250, 500, 1000), `pos_counts` (`top_n` integer 1 to 20), `speaking_pace` (no params), `sentiment_lexicon` (no params).
-
-### GET /api/v1/prompts/config
-
-`{"selections": [{"option_id": "rms_energy", "params": {"window_ms": 250}}]}`. Empty list if nothing is saved. An empty list means a later analysis stores Layer 2 as an empty object. Layer 1 still runs.
-
-### PUT /api/v1/prompts/config
-
-Body: `{"selections": [{"option_id": "pos_counts", "params": {"top_n": 5}}]}`.
-
-Unknown option ids, unknown parameter names, values outside the enum or range, and content-safety hits return `400`. The response is the cleaned selection list.
-
-## Summaries
-
-### POST /api/v1/summaries
-
-```json
-{
-  "group_by": "taxonomy_label",
-  "time_from": "2026-09-01T00:00:00",
-  "time_to": "2026-09-28T23:59:59"
-}
+```mermaid
+flowchart LR
+  uploaded --> processing
+  processing --> completed
+  processing --> blocked
+  processing --> failed
 ```
 
-`group_by` is `user`, `taxonomy_label`, `week`, or `sentiment`. Times are optional. `201` returns the stored rollup. `trigger` is `on_demand`. `result` contains `file_count`, `groups` (`key`, `file_count`, `summary`), `overall_summary`, and `provider`.
+| | |
+| --- | --- |
+| Password | 8 to 72 bytes |
+| Upload | field `files`, up to 10, 20 MB, `wav` `mp3` `m4a` `ogg` `flac` |
+| Chat `message` | 1 to 2,000 characters |
+| Chat `history` | at most 8, role `user` or `assistant` |
+| Chat tools | `search_files` `get_analysis` `run_summary` `profile_speaker` |
+| Empty Analytics list | Insights still runs |
 
-Only analyses with status `completed` are included.
+## List filters
 
-### GET /api/v1/summaries
+| Filter | |
+| --- | --- |
+| `date_from` `date_to` | Optional |
+| `min_duration` `max_duration` | Optional |
+| `taxonomy` | Optional |
+| `custom` | `name:value` |
+| `limit` | Default 50 |
+| `offset` | Optional |
 
-`{"items": [ ... ]}`, newest first, at most 50. Scheduled runs have `trigger` `schedule`.
+## Summaries `group_by`
 
-## Chat
-
-### POST /api/v1/chat
-
-```json
-{
-  "message": "what upcoming events did I mention this week?",
-  "history": [
-    {"role": "user", "content": "Attached 1 file(s): sample_call.wav."},
-    {"role": "assistant", "content": "Processing has started for 1 file(s): sample_call.wav."}
-  ]
-}
-```
-
-`message` is 1 to 2000 characters. `history` is optional, at most 8 turns, each `role` of `user` or `assistant`. Extra fields, including a `user_id`, are rejected with `422`. The server uses the JWT subject and ignores any identity in the body.
-
-`200`:
-
-```json
-{
-  "reply": "Upcoming events:\nsample_call.wav: Please send the notes by Friday.",
-  "tool_calls": [
-    {
-      "name": "search_files",
-      "arguments": {"date_from": "2026-09-28T00:00:00"},
-      "result": {
-        "total": 1,
-        "items": [
-          {
-            "id": "<uuid>",
-            "filename": "sample_call.wav",
-            "taxonomy": {"upcoming_events": ["Please send the notes by Friday."]}
-          }
-        ]
-      }
-    }
-  ]
-}
-```
-
-`tool_calls` has at most one entry. `name` is `search_files`, `get_analysis`, or `run_summary`. `search_files` accepts `date_from`, `date_to`, `min_duration`, `max_duration`, and `taxonomy`. `get_analysis` accepts `file_id`. `run_summary` accepts `group_by` (`user`, `taxonomy_label`, `week`, `sentiment`) and optional times. A miss, including another user's file id, is `result.error` of `not_found` and a reply that says the recording is not on this account.
-
-`400` when content safety blocks the message or any history turn. `401` without a token.
-
-With `LLM_PROVIDER=mock` the plan step is a fixed set of rules. "what upcoming events did I mention this week?" calls `search_files` with the start of the current week. "summarize my files by topic" calls `run_summary` with `group_by` `taxonomy_label`. A question that names a file UUID calls `get_analysis`. The reply is built from the tool result, not from a model.
-
-Authenticated routes, including this one, are also counted by the per-user rate limit. Over the limit is `429` with a `Retry-After` header and `{"detail": "rate limit exceeded"}`. Health, sign-up, login, meta, and the prompt catalog are not counted.
-
-## Meta
-
-### GET /api/v1/health
-
-`{"status": "ok"}`.
-
-### GET /api/v1/health/ready
-
-Checks the database. `503` when it cannot connect.
-
-### GET /api/v1/meta
-
-`{"llm_provider", "safety_provider", "blob_provider", "analysis_mode", "broker", "home_region"}`. The UI uses this to show the mock-mode caption.
-
-### GET /
-
-`{"service": "voice-analytics"}`.
+| `group_by` | |
+| --- | --- |
+| `user` | All of this account's completed recordings |
+| `taxonomy_label` | Topic |
+| `day` `week` `month` | Calendar bucket |
+| `sentiment` | Sentiment |
