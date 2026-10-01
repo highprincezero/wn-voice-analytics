@@ -1,4 +1,5 @@
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +43,17 @@ def _screen(text: str) -> None:
         raise GuardrailError("rejected by content safety")
 
 
+def _screen_all(texts: list[str]) -> None:
+    """Screen the question and each history turn side by side. Any block rejects the turn."""
+    if len(texts) <= 1:
+        for text in texts:
+            _screen(text)
+        return
+    with ThreadPoolExecutor(max_workers=min(len(texts), 9)) as pool:
+        for future in [pool.submit(_screen, text) for text in texts]:
+            future.result()
+
+
 # POST /api/v1/chat; `body: ChatRequest` = parsed + validated JSON request body.
 @router.post("")
 def chat(
@@ -54,11 +66,9 @@ def chat(
     if not message:
         raise HTTPException(status_code=400, detail="message is empty")
     history = [{"role": turn.role, "content": turn.content} for turn in body.history]
+    texts = [message] + [turn["content"] for turn in history if turn["content"].strip()]
     try:
-        _screen(message)
-        for turn in history:
-            if turn["content"].strip():
-                _screen(turn["content"])
+        _screen_all(texts)
     except GuardrailError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     session = open_session(db, user.id, body.session_id)

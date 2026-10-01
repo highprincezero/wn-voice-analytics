@@ -22,16 +22,23 @@ class ApiClient:
         return {"Authorization": f"Bearer {self.token}"}
 
     # Single place every call goes through: builds the URL, adds auth, handles errors.
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    def _request(self, method: str, path: str, timeout: float = 60, **kwargs) -> httpx.Response:
         # httpx.request(method, url, ...): one-off synchronous HTTP call (no client reuse).
-        response = httpx.request(
-            method,
-            f"{self.base_url}{path}",
-            headers=self._headers(),
-            timeout=60,
-            # **kwargs passes json=/params=/files= through to httpx.
-            **kwargs,
-        )
+        try:
+            response = httpx.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._headers(),
+                timeout=timeout,
+                # **kwargs passes json=/params=/files= through to httpx.
+                **kwargs,
+            )
+        except httpx.TimeoutException as exc:
+            raise ApiError(
+                504, "That is taking longer than expected. Try again in a moment."
+            ) from exc
+        except httpx.TransportError as exc:
+            raise ApiError(503, "The server is not reachable right now.") from exc
         # is_success = any 2xx status.
         if response.is_success:
             return response
@@ -122,7 +129,8 @@ class ApiClient:
         payload: dict = {"message": message, "history": history}
         if session_id:
             payload["session_id"] = session_id
-        return self._request("POST", "/api/v1/chat", json=payload).json()
+        # A turn can run a summary over many files, so it gets a longer wait.
+        return self._request("POST", "/api/v1/chat", timeout=180, json=payload).json()
 
     def chat_session(self) -> dict:
         return self._request("GET", "/api/v1/chat/session").json()

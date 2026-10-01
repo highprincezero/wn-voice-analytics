@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     partition_modulus: int = 16
     chunk_chars: int = 4000
     max_chunks: int = 20
+    # Group summaries are written in parallel, this many model calls at a time.
+    summary_workers: int = 6
     mock_stage_delay_sec: float = 0.0
     max_upload_bytes: int = 20 * 1024 * 1024
     home_region: str = "local"

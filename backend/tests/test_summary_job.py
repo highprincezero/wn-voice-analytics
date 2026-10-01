@@ -152,3 +152,30 @@ def test_time_range_and_scheduled_rollup_are_idempotent_within_interval(client, 
         assert second == 0
     finally:
         db.close()
+
+
+def test_group_summaries_run_in_parallel_and_each_group_gets_its_own_call(monkeypatch):
+    import threading
+    import time as clock
+
+    from app.analysis.summarize_group import summarize_groups
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "summary_workers", 4)
+    threads: set[int] = set()
+    seen: list[tuple[str, ...]] = []
+
+    def summarize(texts):
+        threads.add(threading.get_ident())
+        seen.append(tuple(texts))
+        clock.sleep(0.05)
+        return "summary of " + " / ".join(texts)
+
+    groups = {f"label {index}": [f"note {index}"] for index in range(8)}
+    started = clock.monotonic()
+    written = summarize_groups(groups, summarize)
+    elapsed = clock.monotonic() - started
+    assert written == {key: f"summary of {texts[0]}" for key, texts in groups.items()}
+    assert sorted(seen) == sorted((texts[0],) for texts in groups.values())
+    assert len(threads) > 1
+    assert elapsed < 0.05 * 8

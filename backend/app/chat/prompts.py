@@ -49,6 +49,8 @@ CHAT_COMPOSE_PROMPT = (
     "Do not add features. "
     "help: the message was unclear or needs no tool. Say so briefly and suggest one or two "
     "things from the capabilities in <context>. "
+    "completed_recordings in <context> is how many finished recordings the account has. "
+    "When it is above 0, never say there are no recordings or ask for an upload first. "
     "memory: tell the user their previous question, quoting previous_question from <context> "
     "exactly. If previous_question is empty, say this is the first question in this chat. "
     "tool_error: the answer could not be found. Explain it plainly from error_summary in "

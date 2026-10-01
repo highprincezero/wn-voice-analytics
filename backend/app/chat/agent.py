@@ -578,6 +578,28 @@ def plan_with_azure(message: str, history: list[dict]) -> dict:
     return choice
 
 
+# Requests the rules can route with certainty. A summary request must never fall through
+# to a no-tool reply, which has no data and could wrongly say there are no recordings.
+_RULE_BACKED_INTENTS = {"summary"}
+
+
+def _plan_azure_or_rules(message: str, history: list[dict]) -> dict:
+    """The model plans first. A clear summary request it left without a tool, or a failed
+    planner call, goes to the rules planner instead."""
+    try:
+        choice = plan_with_azure(message, history)
+    except Exception:
+        logger.warning("chat planner call failed; using rules", exc_info=True)
+        return plan_with_rules(message)
+    if choice.get("tool_name"):
+        return choice
+    rules = plan_with_rules(message)
+    if rules.get("intent") in _RULE_BACKED_INTENTS and rules.get("tool_name"):
+        logger.info("chat planner picked no tool for a %s request; using rules", rules["intent"])
+        return rules
+    return choice
+
+
 # Step 3 with the LLM: write the user-facing reply (structured JSON).
 def compose_with_azure(
     message: str,
@@ -620,7 +642,13 @@ def _previous_reply(history: list) -> str:
     return ""
 
 
-def compose_inputs(intent: str, tool_name: str, tool_result: dict, history: list) -> dict:
+def compose_inputs(
+    intent: str,
+    tool_name: str,
+    tool_result: dict,
+    history: list,
+    completed_recordings: int | None = None,
+) -> dict:
     """What the compose model sees: the turn kind, the tool result, and context."""
     if intent == "memory":
         return {
@@ -636,11 +664,10 @@ def compose_inputs(intent: str, tool_name: str, tool_result: dict, history: list
         }
     if not tool_name or intent in _NO_TOOL_INTENTS:
         turn = intent if intent in _NO_TOOL_INTENTS else "help"
-        return {
-            "intent": turn,
-            "tool_result": {},
-            "context": {"capabilities": list(CAPABILITIES)},
-        }
+        context: dict = {"capabilities": list(CAPABILITIES)}
+        if completed_recordings is not None:
+            context["completed_recordings"] = completed_recordings
+        return {"intent": turn, "tool_result": {}, "context": context}
     return {"intent": intent, "tool_result": tool_result, "context": {}}
 
 
@@ -709,9 +736,9 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
                     logger.info("chat plan user=%s tool=%s", user_id, state["tool_name"])
                     return state
             if get_settings().llm_provider == "azure":
-                choice = plan_with_azure(state.get("message") or "", state.get("history") or [])
+                choice = _plan_azure_or_rules(message, state.get("history") or [])
             else:
-                choice = plan_with_rules(state.get("message") or "")
+                choice = plan_with_rules(message)
             state["intent"] = choice.get("intent") or "help"
             state["tool_name"] = choice.get("tool_name") or ""
             state["tool_arguments"] = choice.get("arguments") or {}
@@ -754,7 +781,14 @@ def build_chat_graph(db: Session, user_id: uuid.UUID):
             if get_settings().llm_provider != "azure":
                 state["reply"] = _rules_reply(intent, asked, tool_result, history)
                 return state
-            inputs = compose_inputs(intent, tool_name, tool_result, history)
+            recordings = None
+            if not tool_name:
+                recordings = (
+                    db.query(AudioFile)
+                    .filter(AudioFile.user_id == user_id, AudioFile.status == "completed")
+                    .count()
+                )
+            inputs = compose_inputs(intent, tool_name, tool_result, history, recordings)
             try:
                 written = compose_with_azure(
                     asked,

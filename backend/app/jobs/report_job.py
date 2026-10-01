@@ -18,7 +18,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.analysis.providers.intelligence import get_intelligence
-from app.analysis.summarize_group import summarize_group
+from app.analysis.summarize_group import summarize_groups
 from app.config import get_settings
 from app.db.models import Analysis, GroupReport
 from app.db.session import SessionLocal
@@ -165,19 +165,12 @@ def build_report(rows: list[Analysis], groupings: list[str], summarize) -> dict:
     summarize(list_of_summaries) -> str is the fixed rollup prompt call. Groups with the
     same files reuse that one written summary, since the model input is identical.
     """
-    written: dict[tuple[str, ...], str] = {}
-    calls = 0
 
-    def context_summary(members: list[Analysis]) -> str:
-        nonlocal calls
-        key = tuple(sorted(str(row.id) for row in members))
-        if key not in written:
-            texts = [row.summary or "" for row in members]
-            written[key] = summarize_group(texts, summarize)
-            calls += 1
-        return written[key]
+    def members_key(members: list[Analysis]) -> str:
+        return ",".join(sorted(str(row.id) for row in members))
 
-    sections = []
+    # Bucket in code first, so every distinct member set is known up front.
+    bucketed: list[tuple[str, list[tuple[str, list[Analysis]]]]] = []
     for grouping in groupings:
         buckets: dict[str, list[Analysis]] = {}
         for row in rows:
@@ -186,13 +179,25 @@ def build_report(rows: list[Analysis], groupings: list[str], summarize) -> dict:
         ordered = sorted(buckets.items(), key=lambda item: (-len(item[1]), item[0]))
         if grouping in {"day", "week", "month"}:
             ordered = sorted(buckets.items())
+        bucketed.append((grouping, ordered))
+
+    # One AI summary per distinct member set, written in parallel.
+    texts: dict[str, list[str]] = {}
+    for _grouping, ordered in bucketed:
+        for _key, members in ordered:
+            texts.setdefault(members_key(members), [row.summary or "" for row in members])
+    written = summarize_groups(texts, summarize)
+    calls = len(written)
+
+    sections = []
+    for grouping, ordered in bucketed:
         groups = []
         for key, members in ordered:
             groups.append(
                 {
                     "key": key,
                     **group_stats(members),
-                    "summary": context_summary(members),
+                    "summary": written[members_key(members)],
                 }
             )
         sections.append(

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.analysis.providers.intelligence import get_intelligence
-from app.analysis.summarize_group import summarize_group
+from app.analysis.summarize_group import summarize_group, summarize_groups
 from app.config import get_settings
 from app.db.models import Analysis, RollupSummary
 from app.db.session import SessionLocal
@@ -78,13 +78,14 @@ def run_rollup(
     rows = query.order_by(Analysis.created_at.asc()).all()
     provider = get_intelligence()
     grouped = _groups(rows, group_by)
+    written = summarize_groups(grouped, provider.rollup_summary)
     built = []
     for key, summaries in sorted(grouped.items()):
         built.append(
             {
                 "key": key,
                 "file_count": len(summaries),
-                "summary": summarize_group(summaries, provider.rollup_summary),
+                "summary": written[key],
             }
         )
     overall = summarize_group([item["summary"] for item in built], provider.rollup_summary)
