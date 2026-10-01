@@ -81,6 +81,8 @@ The catalog today:
 | `speaking_pace` | none | Words per minute from the transcript and the measured duration |
 | `sentiment_lexicon` | none | Counts against a fixed word list |
 
+Users pick which measures run, and their parameters, in the Analytics settings panel (next to Ask from a template) or with `PUT /api/v1/prompts/config`. All four run at their defaults until a choice is saved, and an empty list also means all four, so the panel asks for at least one. A saved choice applies to new uploads; unchecked measures are skipped.
+
 Custom list filters use the same idea. `custom` must be `name:value`, and `name` must be one of `sentiment`, `adjective_count`, `noun_count`, `wpm`, `rms_mean`. Sentiment values must be `positive`, `neutral`, or `negative`. Numeric filters must sit inside a declared range.
 
 Summaries `group_by` is `user`, `taxonomy_label`, `day`, `week`, `month`, or `sentiment`.

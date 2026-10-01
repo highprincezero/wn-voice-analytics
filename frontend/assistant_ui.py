@@ -123,6 +123,11 @@ _LAYER2_LABEL = {
     "rms_energy": "Loudness (RMS)",
     "pos_counts": "Nouns & adjectives",
 }
+# Plain labels for the Analytics parameters in the settings panel.
+_PARAM_LABEL = {
+    "window_ms": "Loudness (RMS) window",
+    "top_n": "Top nouns/adjectives shown",
+}
 _SKIP_TEXT = {
     "wav_pcm16_required": "Not measured (older run, only 16-bit WAV was read); re-analyze",
     "audio_decode_failed": "The audio could not be decoded",
@@ -1817,7 +1822,7 @@ def _word_line(items: object) -> str:
         for item in items or []
         if isinstance(item, dict) and item.get("lemma")
     ]
-    return ", ".join(words[:5])
+    return ", ".join(words[:20])
 
 
 def _analytics_view(data: dict) -> tuple[list[str], str]:
@@ -2864,6 +2869,106 @@ def _template_panel(api: ApiClient) -> None:
         _render_rollup(data, "suggest")
 
 
+def _settings_values(options: list[dict], saved: list[dict]) -> dict[str, dict]:
+    """Checked state and parameters per measure. No saved config means all on, defaults."""
+    chosen = {
+        str(item.get("option_id")): item.get("params") or {}
+        for item in saved or []
+        if isinstance(item, dict)
+    }
+    values: dict[str, dict] = {}
+    for option in options:
+        option_id = str(option.get("id"))
+        stored = chosen.get(option_id) or {}
+        params = {}
+        for name, spec in (option.get("params") or {}).items():
+            value = stored.get(name, spec.get("default"))
+            if spec.get("type") == "enum" and value not in (spec.get("values") or []):
+                value = spec.get("default")
+            params[name] = value
+        values[option_id] = {"checked": not chosen or option_id in chosen, "params": params}
+    return values
+
+
+def _param_input(option_id: str, name: str, spec: dict, value: object) -> object:
+    label = _PARAM_LABEL.get(name, _nice(name))
+    key = f"va-analytics-{option_id}-{name}"
+    if spec.get("type") == "enum":
+        choices = list(spec.get("values") or [])
+        suffix = " ms" if name.endswith("_ms") else ""
+        return st.selectbox(
+            label,
+            choices,
+            index=choices.index(value) if value in choices else 0,
+            format_func=lambda item: f"{item}{suffix}",
+            key=key,
+        )
+    if spec.get("type") == "int":
+        low, high = int(spec.get("min", 0)), int(spec.get("max", 100))
+        start = int(value) if isinstance(value, int) else int(spec.get("default", low))
+        return int(
+            st.number_input(
+                label,
+                min_value=low,
+                max_value=high,
+                value=min(max(start, low), high),
+                step=1,
+                key=key,
+            )
+        )
+    return value
+
+
+def _analytics_panel(api: ApiClient) -> None:
+    """Which Analytics measures run on new uploads, and their settings. Saved per user."""
+    try:
+        options = api.prompt_options()
+        saved = api.get_config().get("selections") or []
+    except ApiError as exc:
+        st.error(exc.detail)
+        return
+    values = _settings_values(options, saved)
+    with st.form("va-analytics-form", border=False):
+        picked: list[dict] = []
+        for option in options:
+            option_id = str(option.get("id"))
+            current = values.get(option_id) or {"checked": True, "params": {}}
+            specs = option.get("params") or {}
+            left, right = st.columns([3, 2], vertical_alignment="center")
+            with left:
+                checked = st.checkbox(
+                    str(option.get("label") or _nice(option_id)),
+                    value=current["checked"],
+                    key=f"va-analytics-{option_id}",
+                )
+                if option.get("description"):
+                    st.caption(str(option["description"]))
+            params = {}
+            with right:
+                for name, spec in specs.items():
+                    params[name] = _param_input(option_id, name, spec, current["params"].get(name))
+            if checked:
+                picked.append({"option_id": option_id, "params": params})
+        submitted = st.form_submit_button("Save", type="primary")
+        st.caption("Applies to new uploads.")
+    if not submitted:
+        return
+    if not picked:
+        st.warning("Pick at least one measure to save.")
+        return
+    try:
+        stored = api.save_config(picked)
+    except ApiError as exc:
+        st.error(exc.detail)
+        return
+    labels = {str(option.get("id")): str(option.get("label")) for option in options}
+    names = [
+        labels.get(str(item.get("option_id")), str(item.get("option_id")))
+        for item in stored.get("selections") or picked
+    ]
+    st.success(f"Saved. New uploads will run: {', '.join(names)}.")
+
+
 def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
     rows = _safe_files(api) if files is None else files
     completed = [item for item in rows if item.get("status") == "completed"]
@@ -2886,11 +2991,19 @@ def _suggestion_box(api: ApiClient, files: list[dict] | None = None) -> None:
                     None if current == "template" else "template"
                 )
                 st.rerun()
+            if st.button("Analytics settings", key="va-open-analytics", type="tertiary"):
+                current = st.session_state.get("assistant_suggest")
+                st.session_state["assistant_suggest"] = (
+                    None if current == "analytics" else "analytics"
+                )
+                st.rerun()
         mode = st.session_state.get("assistant_suggest")
         if mode == "browse":
             _browse_panel(api)
         elif mode == "template":
             _template_panel(api)
+        elif mode == "analytics":
+            _analytics_panel(api)
 
 
 def _greeting(returning: bool) -> str:
@@ -3025,15 +3138,16 @@ def _default_selections(options: list[dict]) -> list[dict]:
 
 
 def _start_pending(api: ApiClient) -> None:
-    """Upload the attached files and run every Analytics measure."""
+    """Upload the attached files. Analytics runs the measures saved in Analytics settings."""
     pending = list(st.session_state.get("assistant_pending") or [])
     if not pending:
         st.session_state["assistant_phase"] = "ready"
         return
 
     def _upload():
-        selections = _default_selections(api.prompt_options())
-        api.save_config(selections)
+        # First use only: save every measure at its default. Never overwrite saved choices.
+        if not api.get_config().get("selections"):
+            api.save_config(_default_selections(api.prompt_options()))
         return api.upload(pending)
 
     try:

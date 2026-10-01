@@ -68,6 +68,63 @@ def test_pipeline_is_deterministic_and_uses_layer2(client, auth):
     assert detail["transcript"]
 
 
+def _upload_sample(client, auth, name: str) -> dict:
+    response = client.post(
+        "/api/v1/files",
+        headers=auth,
+        files=[("files", (name, SAMPLE_CALL.read_bytes(), "audio/wav"))],
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["items"][0]
+
+
+def test_saved_analytics_choices_apply_to_the_next_upload(client, auth):
+    """Unchecked measures are skipped, and saved parameters are used on the next upload."""
+    first = client.put(
+        "/api/v1/prompts/config",
+        headers=auth,
+        json={
+            "selections": [
+                {"option_id": "pos_counts", "params": {"top_n": 1}},
+                {"option_id": "sentiment_lexicon", "params": {}},
+            ]
+        },
+    )
+    assert first.status_code == 200, first.text
+    item = _upload_sample(client, auth, "one.wav")
+    assert set(item["layer2"]) == {"pos_counts", "sentiment_lexicon"}
+    counts = item["layer2"]["pos_counts"]
+    assert counts["noun_count"] >= 1
+    assert len(counts["top_nouns"]) == 1
+
+    second = client.put(
+        "/api/v1/prompts/config",
+        headers=auth,
+        json={"selections": [{"option_id": "rms_energy", "params": {"window_ms": 1000}}]},
+    )
+    assert second.status_code == 200, second.text
+    item = _upload_sample(client, auth, "two.wav")
+    assert set(item["layer2"]) == {"rms_energy"}
+    energy = item["layer2"]["rms_energy"]
+    assert energy["window_ms"] == 1000
+    # The sample is 4.0 seconds, so 1000 ms windows give four values.
+    assert len(energy["windows"]) == 4
+
+
+def test_empty_analytics_config_runs_every_measure(client, auth):
+    saved = client.put("/api/v1/prompts/config", headers=auth, json={"selections": []})
+    assert saved.status_code == 200, saved.text
+    item = _upload_sample(client, auth, "all.wav")
+    assert set(item["layer2"]) == {
+        "rms_energy",
+        "pos_counts",
+        "speaking_pace",
+        "sentiment_lexicon",
+    }
+    assert item["layer2"]["rms_energy"]["window_ms"] == 250
+    assert len(item["layer2"]["pos_counts"]["top_nouns"]) <= 5
+
+
 def test_map_reduce_keeps_topics_from_later_chunks(client, auth, monkeypatch):
     monkeypatch.setattr(get_settings(), "chunk_chars", 80)
     long_tail = (
