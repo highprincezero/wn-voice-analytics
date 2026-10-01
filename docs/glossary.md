@@ -29,7 +29,7 @@
 
 Langfuse is the trace store at port 3000. Each row below is a name on a trace. A model call is one row. A workflow step is another row. The workflow runner is Microsoft Agent Framework. The recording workflow is named analysis. The chat workflow is named chat.
 
-Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, where the model column shows `mock`. Only processes that have both Langfuse keys send traces. Compose gives them to the worker, not the API, so steps that run in the API do not appear there.
+Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, where the model column shows `mock`. Only processes that have both Langfuse keys send traces. Compose gives them to the worker, not the API, so steps that run in the API do not appear there. The chat planner and reply model calls write no generation name, even with keys; only their workflow steps below would show.
 
 | Name (azure) | Name (mock) | Meaning |
 | --- | --- | --- |
@@ -47,12 +47,13 @@ Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, wh
 | executor.process prepare | Measure duration, and whether the audio could be decoded. |
 | executor.process transcribe | Speech to text. |
 | executor.process shield | Content safety check. A block skips Insights and Analytics. |
+| executor.process stop | Ends the run after a block. It saves nothing itself. |
 | executor.process layer1 | Insights. A short transcript writes AudioLayer1. A long one writes AudioChunk, then AudioReduce. |
 | executor.process layer2 | Analytics: one AudioLayer2Prompts call with the ticked predefined prompts. Loudness and pace come from the measuring tools. |
 | executor.process validate | Check the Insights and Analytics result before it is saved. |
 | executor.process plan | Chat chooses a tool, or none. This step runs in the API. |
 | executor.process tools | Chat runs that tool. This step runs in the API. |
-| executor.process compose | Chat writes the reply. With Azure the model writes every reply. This step runs in the API. |
+| executor.process compose | Chat writes the reply. With Azure the model writes every reply. Fixed text only when that call fails. This step runs in the API. |
 | edge_group.process SingleEdgeGroup | Hand the result from one step to the next step. |
 | edge_group.process InternalEdgeGroup | Hand a framework message into a step. |
 | message.send | A step sends its state onward. |

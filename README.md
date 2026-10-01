@@ -21,7 +21,7 @@ flowchart LR
 | Insights | Length, summary, professional topics, personal topics, upcoming events |
 | Analytics | Predefined AI prompts: loudness and pace (via measuring tools), nouns and adjectives, sentiment, action items, tone, key entities |
 | Summaries | All recordings, topic, day, week, month, sentiment |
-| Export | Browse results: Download CSV or JSON of the rows shown, filters applied |
+| Export | Browse results holds the latest 200 recordings. Its column filters and the CSV or JSON download cover those rows |
 | Opening line | Fixed list. No model call |
 | Chat reply | Azure: `gpt-5-mini` writes every reply. Fixed text only when that call fails, and in mock mode |
 

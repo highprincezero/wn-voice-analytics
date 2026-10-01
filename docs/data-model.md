@@ -148,6 +148,8 @@ flowchart LR
   processing --> failed["status failed"]
 ```
 
+Run again sets any status back to uploaded. A failed run is tried again (Celery up to 2 more times; Service Bus until the message has been delivered 10 times), and each try sets processing again.
+
 ## Stages
 
 The order of work recorded for one file. layer1 is Insights. layer2 is Analytics.
