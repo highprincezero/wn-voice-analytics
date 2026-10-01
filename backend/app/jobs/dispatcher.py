@@ -19,6 +19,9 @@ def dispatch(message: dict, queue: str | None = None) -> None:
             raise ValueError("file_id and user_id are required")
         run_file_analysis(str(file_id), str(user_id))
         return
+    # Nothing publishes "rollup" or "scheduled_rollup" today. The scheduled summary runs
+    # as its own job, on-demand summaries run in the API, and the rollup queue carries
+    # "group_report" (All groupings report) messages. Kept for a later move onto the queue.
     if kind == "rollup":
         user_id = message.get("user_id")
         group_by = message.get("group_by") or "user"

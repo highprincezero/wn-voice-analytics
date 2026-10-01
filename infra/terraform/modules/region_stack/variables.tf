@@ -58,7 +58,7 @@ variable "apim_user_rate_limit" {
 
 variable "apim_anonymous_rate_limit" {
   type        = number
-  description = "Unauthenticated requests per source IP per window."
+  description = "Unauthenticated requests per client IP per window. The key is X-Azure-ClientIP from Front Door, or the caller IP when it is missing."
   default     = 60
 }
 

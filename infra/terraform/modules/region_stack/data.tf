@@ -46,6 +46,29 @@ resource "azurerm_storage_account" "this" {
   }
 }
 
+# Versioning keeps the old bytes when a blob is overwritten or deleted. This rule deletes
+# a previous version after 7 days, counted from when it was written.
+# Azure runs lifecycle rules about once a day.
+resource "azurerm_storage_management_policy" "versions" {
+  storage_account_id = azurerm_storage_account.this.id
+
+  rule {
+    name    = "delete-old-versions"
+    enabled = true
+
+    filters {
+      blob_types   = ["blockBlob"]
+      prefix_match = ["${azurerm_storage_container.voice.name}/"]
+    }
+
+    actions {
+      version {
+        delete_after_days_since_creation = 7
+      }
+    }
+  }
+}
+
 resource "azurerm_storage_container" "voice" {
   name                  = "voice"
   storage_account_id    = azurerm_storage_account.this.id

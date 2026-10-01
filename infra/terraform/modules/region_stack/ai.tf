@@ -8,6 +8,9 @@ resource "azurerm_cognitive_account" "openai" {
   custom_subdomain_name = "oai-${var.name_prefix}-${var.region_name}"
 }
 
+# gpt-4o-transcribe is offered only as GlobalStandard, so audio may be processed in any
+# Azure region. Microsoft lists version 2025-03-20 for retirement on 2026-10-15 with no
+# replacement named yet. Check the retirement schedule before an apply.
 resource "azurerm_cognitive_deployment" "transcribe" {
   name                 = "gpt-4o-transcribe"
   cognitive_account_id = azurerm_cognitive_account.openai.id
@@ -34,8 +37,9 @@ resource "azurerm_cognitive_deployment" "chat" {
     version = "2025-08-07"
   }
 
+  # DataZoneStandard keeps processing inside the US or EU data zone of openai_location.
   sku {
-    name     = "GlobalStandard"
+    name     = "DataZoneStandard"
     capacity = 80
   }
 }

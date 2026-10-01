@@ -241,7 +241,7 @@ Schema check of Insights and Analytics"]
 | Plan | Fixed rules first for memory, greetings, capabilities, voice questions, a named file id, and "what it says". Otherwise `gpt-5-mini` picks the tool. Rules again if that call fails or leaves a clear summary request without a tool | Fixed rules |
 | Reply | `gpt-5-mini` writes every reply, including greetings, help, and tool errors. Fixed text only when that call fails | Fixed rules |
 | Voice questions | Gender, age, accent, emotion, or who is speaking call `profile_speaker` on the recording named in the question, otherwise the newest. The audio comes through the MCP `fetch_audio` tool (a direct blob read when `MCP_AUDIO_URL` is unset or the call fails) | Same |
-| Voice traits | Need an audio-input deployment. `gpt-5-mini` takes text and images, and `gpt-4o-transcribe` only transcribes, so with the current deployments the acoustic fallback answers: duration and loudness only | Acoustic fallback |
+| Voice traits | Need an audio-input deployment. `gpt-5-mini` takes text and images, and `gpt-4o-transcribe` only transcribes, so with the current deployments the acoustic fallback answers: duration and loudness only. Known limit: for an `.mp3` upload, `azure.py` labels the audio `mp3` from the filename even after ffmpeg has turned it into WAV | Acoustic fallback |
 | Temperature | Empty unless `AZURE_OPENAI_CHAT_TEMPERATURE` is set | |
 
 The steps that answer one question.
@@ -303,7 +303,7 @@ flowchart LR
 | Database | PostgreSQL 16 | One server per region, plus a standby in another zone |
 | Models | Azure OpenAI and Content Safety when `LLM_PROVIDER` and `SAFETY_PROVIDER` are `azure`. Mock by default (Compose and `.env.example`), with no keys | Azure OpenAI and Content Safety |
 | Front door | none locally | Front Door, then API Management. Any healthy region. No routing by `home_region`; the other region answers 401 |
-| Work | Inline in tests. Celery in Compose | One worker copy. The ceiling is 20 and no rule adds a copy |
+| Work | Inline in tests. Celery in Compose | 1 to 20 worker copies. A Service Bus rule adds one copy per waiting `transcription` message |
 | Account limit | 120 a minute when the limiter is on | 120 a minute |
 | Trace | Langfuse when both keys are set. A failed send leaves the file result in place | Not configured. Terraform sets no Langfuse keys |
 | Telemetry | Application Insights only when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set (the worker in Compose) | API, workers, and job get the connection string. Only the API starts the exporter |

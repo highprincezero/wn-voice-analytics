@@ -16,12 +16,13 @@ The chat agent runs this skill on demand through its `profile_speaker` tool. It 
 ## Where the audio comes from
 
 1. The stored audio is fetched fresh for the turn through the MCP `fetch_audio` tool when `MCP_AUDIO_URL` is set (Compose). When it is unset, or the call fails, the same blob is read directly.
-2. Non-WAV uploads are converted to 16-bit PCM WAV with ffmpeg first.
+2. Non-WAV uploads are converted to 16-bit PCM WAV with ffmpeg first. If ffmpeg fails, the original bytes are sent.
 3. A recording blocked by the content safety check is never sent to the model. The tool returns its metadata and the block reason only.
 
 ## Who answers
 
 - `LLM_PROVIDER=azure`: the code sends the audio (up to about 4 MB) and the prompt below to the `gpt-5-mini` chat deployment, then to the transcription deployment if that call fails. The reply must match a strict JSON schema. Voice-trait analysis needs an audio-input deployment. `gpt-5-mini` takes text and images, and `gpt-4o-transcribe` only transcribes, so with the current deployments both calls fail and the acoustic fallback answers.
+- Known limit: the audio format in the request comes from the filename. For an `.mp3` upload the code labels the converted WAV as `mp3`. An audio-input deployment could reject or misread that clip.
 - Mock mode, and the fallback: `acoustic_profile()` in `backend/app/analysis/speaker_skill.py` measures duration and loudness only and says that age, accent, and style are not estimated.
 
 ## What it returns

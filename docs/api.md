@@ -46,7 +46,7 @@ TOKEN=$(curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
 FILE_ID=$(curl -s -X POST $API/files -H "Authorization: Bearer $TOKEN" \
   -F files=@samples/sample_call.wav \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')
-curl -s $API/files/$FILE_ID -H "Authorization: Bearer $TOKEN"     # repeat until "status": "completed"
+curl -s "$API/files/$FILE_ID" -H "Authorization: Bearer $TOKEN"     # repeat until "status": "completed"
 curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"message":"What action items came out of my recordings?"}'
 ```

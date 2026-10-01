@@ -190,13 +190,13 @@ The multi-region setup is a design kept in the repo. It is not a running deploym
 This is a design plus Terraform. It is not a running multi-region deployment.
 
 ```bash
-cd infra/terraform
+cd infra/terraform || exit 1
 cp terraform.tfvars.example terraform.tfvars   # set db_admin_password and jwt_secret
 terraform init
 terraform plan
 ```
 
-`regions` defaults to eastus and westeurope. Each region is its own stack. Front Door is the shared front door. Check without credentials:
+`regions` defaults to eastus and westeurope. Each region's Azure OpenAI account defaults to eastus2 and swedencentral (`openai_location`), because eastus and westeurope do not offer `gpt-4o-transcribe`. Each region is its own stack. Front Door is the shared front door. Check without credentials:
 
 ```bash
 terraform fmt -check -recursive
@@ -224,7 +224,7 @@ ANALYSIS_MODE=celery
 
 ## Configuration
 
-Copy [.env.example](.env.example) to `.env`. Mock mode needs no keys. The comments in that file cover the rest. The ones people trip on:
+Copy [.env.example](.env.example) to `.env`. Mock mode needs no keys. The app reads `.env` from the folder it is started in. The comments in that file cover the rest. The ones people trip on:
 
 | Variable | Meaning |
 | --- | --- |
@@ -236,6 +236,10 @@ Copy [.env.example](.env.example) to `.env`. Mock mode needs no keys. The commen
 | `MOCK_STAGE_DELAY_SEC` | `1.5` in Compose so the stages are visible. `0` elsewhere |
 | `CHUNK_CHARS` / `MAX_CHUNKS` | 4000 / 20. Longer transcripts are split, then merged |
 | `RATE_LIMIT_REQUESTS` | 120 per minute per account |
+| `JWT_ALGORITHM` | `HS256`. The API Management policy checks HS256 only, so keep it |
+| `SUMMARY_WORKERS` | 6. Group summaries are written this many model calls at a time |
+| `DISPLAY_TIMEZONE` | `Asia/Manila`. Upload times in chat replies, used to tell same-name recordings apart |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING`, `API_BASE_URL`, `POSTGRES_TEST_URL` | Read from the real environment only, never from `.env`. Outside Docker, export them |
 
 ## API
 
@@ -263,7 +267,7 @@ FILE_ID=$(curl -s -X POST $API/files -H "Authorization: Bearer $TOKEN" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')
 
 # Poll until status is completed (a few seconds in mock mode).
-curl -s $API/files/$FILE_ID -H "Authorization: Bearer $TOKEN" \
+curl -s "$API/files/$FILE_ID" -H "Authorization: Bearer $TOKEN" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["stage"])'
 
 # Ask a question (200). Send the returned session_id with the next turn to keep one chat.
@@ -282,7 +286,7 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/files/{id}/audio` | yes | Audio bytes |
 | GET | `/events` | yes | Processing log |
 | POST | `/files/{id}/analyze` | yes | Run it again |
-| DELETE | `/files/{id}` | yes | Delete it |
+| DELETE | `/files/{id}` | yes | Delete it. In Azure, the old Blob version is purged after 7 days, counted from when it was written |
 | GET | `/prompts/options` | no | Analytics catalog |
 | GET | `/prompts/config` | yes | The saved options |
 | PUT | `/prompts/config` | yes | Save the chosen options |
@@ -317,12 +321,12 @@ Summarize across files offers one summary at a time (trend per day, week, or mon
 
 **Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
 
-**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. In Azure mode only the first 10,000 characters of each text are sent to the check; the rest is not screened. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
 ### Guardrails for Layer 2
 
 - Filter parameters: the UI offers only fixed choices. The server does not trust the API and re-checks every request against the whitelist: unknown ids, out-of-range or wrongly typed params (for example `window_ms` 123), and extra fields are rejected with an error. Only fixed server-side prompt text reaches the LLM; user values are validated numbers.
-- Audio content: the content-safety check screens every transcript before any summary, Analytics, or chat model call. Blocked transcripts never reach the LLM or chat. Hardened prompts treat the transcript as untrusted data inside escaped markers. Output is schema-validated, and loudness and pace numbers come from server tools only.
+- Audio content: the content-safety check screens every transcript before any summary, Analytics, or chat model call. In Azure mode it screens the first 10,000 characters only. Blocked transcripts never reach the LLM or chat. Hardened prompts treat the transcript as untrusted data inside escaped markers. Output is schema-validated, and loudness and pace numbers come from server tools only.
 
 ## Worth knowing
 

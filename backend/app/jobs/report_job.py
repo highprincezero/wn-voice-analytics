@@ -40,8 +40,6 @@ GROUPING_LABELS = {
     "action_items": "Action items",
 }
 
-# Bound the number of model calls on accounts with many labels or days.
-
 
 def validate_groupings(groupings: list[str] | None) -> list[str]:
     """Whitelist check. None or empty means every grouping, in the fixed order."""

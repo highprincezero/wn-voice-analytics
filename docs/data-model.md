@@ -180,6 +180,6 @@ users/{user_id}/analysis/{file_id}.json
 | --- | --- |
 | `ext` | `wav` `mp3` `m4a` `ogg` `flac` |
 | Download | Under that account's prefix |
-| Delete | The three objects and the rows |
-| Run again | Updates the transcript and the analysis |
+| Delete | The three objects and the rows. In Azure, Blob versioning keeps each old version for 7 days, counted from when it was written. Then a lifecycle rule purges it |
+| Run again | Updates the transcript and the analysis. In Azure the replaced versions are purged the same way |
 | `home_region` | `local` on this machine. One cloud region holds the account |

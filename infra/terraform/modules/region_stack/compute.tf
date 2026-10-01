@@ -78,6 +78,11 @@ resource "azurerm_container_app" "api" {
         name        = "JWT_SECRET"
         secret_name = "jwt-secret"
       }
+      # Settings reads this. HS256 is also the default and the algorithm the APIM policy checks.
+      env {
+        name  = "JWT_ALGORITHM"
+        value = "HS256"
+      }
       env {
         name  = "LLM_PROVIDER"
         value = "azure"
@@ -137,14 +142,6 @@ resource "azurerm_container_app" "api" {
       env {
         name  = "HOME_REGION"
         value = var.region_name
-      }
-      env {
-        name  = "OTEL_ENABLED"
-        value = "true"
-      }
-      env {
-        name  = "OTEL_SERVICE_NAME"
-        value = "voice-analytics-api-${var.region_name}"
       }
       env {
         name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
@@ -225,10 +222,30 @@ resource "azurerm_container_app" "worker" {
     name  = "appinsights-connection"
     value = azurerm_application_insights.this.connection_string
   }
+  # Used only by the scale rule. KEDA reads the queue length, which needs Manage.
+  secret {
+    name  = "servicebus-scaler-connection"
+    value = azurerm_servicebus_namespace_authorization_rule.scaler.primary_connection_string
+  }
 
   template {
     min_replicas = 1
     max_replicas = 20
+
+    # One copy works one message at a time, so ask for one copy per waiting message.
+    # KEDA counts waiting messages, not locked ones being worked on.
+    custom_scale_rule {
+      name             = "transcription-queue"
+      custom_rule_type = "azure-servicebus"
+      metadata = {
+        queueName    = azurerm_servicebus_queue.transcription.name
+        messageCount = "1"
+      }
+      authentication {
+        secret_name       = "servicebus-scaler-connection"
+        trigger_parameter = "connection"
+      }
+    }
 
     container {
       name    = "worker"
@@ -252,10 +269,6 @@ resource "azurerm_container_app" "worker" {
       env {
         name  = "BLOB_PROVIDER"
         value = "azure"
-      }
-      env {
-        name  = "BROKER"
-        value = "servicebus"
       }
       env {
         name        = "AZURE_STORAGE_CONNECTION_STRING"
@@ -292,18 +305,6 @@ resource "azurerm_container_app" "worker" {
       env {
         name        = "SERVICE_BUS_CONNECTION_STRING"
         secret_name = "servicebus-connection"
-      }
-      env {
-        name  = "HOME_REGION"
-        value = var.region_name
-      }
-      env {
-        name  = "OTEL_ENABLED"
-        value = "true"
-      }
-      env {
-        name  = "OTEL_SERVICE_NAME"
-        value = "voice-analytics-worker-${var.region_name}"
       }
       env {
         name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
@@ -369,10 +370,6 @@ resource "azurerm_container_app_job" "rollup" {
         value = azurerm_cognitive_deployment.chat.name
       }
       env {
-        name  = "HOME_REGION"
-        value = var.region_name
-      }
-      env {
         name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
         secret_name = "appinsights-connection"
       }
@@ -381,7 +378,9 @@ resource "azurerm_container_app_job" "rollup" {
 }
 
 # Basic supports rate-limit-by-key. Consumption does not.
-# Premium would add zones and a virtual network. This rate fits one Basic unit.
+# Premium would add zones and a virtual network. One Basic unit is rated at about
+# 1,000 requests a second. The worst case in docs/scaling.md is about 1,020, so this
+# needs a load test before it is trusted.
 resource "azurerm_api_management" "this" {
   name                = "apim-${var.name_prefix}-${var.region_name}"
   location            = azurerm_resource_group.this.location

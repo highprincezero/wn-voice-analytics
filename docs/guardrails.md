@@ -102,7 +102,7 @@ Filter parameters:
 
 Audio content:
 
-- The content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) screens the transcript before any summary, Analytics, or chat model call.
+- The content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) screens the transcript before any summary, Analytics, or chat model call. In Azure mode only the first 10,000 characters are sent to the check. The mock list reads the whole text.
 - Blocked transcripts never reach the LLM or chat. Insights and Analytics are skipped.
 - Hardened system prompts treat the transcript as untrusted data inside escaped `<transcript>` markers, name common injection patterns, and never follow commands in it.
 - Output is a strict JSON schema built from the ticked options, then validated again on the server. A bad or missing part is stored as skipped, never as a result.
@@ -122,13 +122,13 @@ Prompt Shields (in mock mode, the jailbreak phrase list) runs on the custom filt
 
 ### 3. The transcript is data, not instructions
 
-**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. In Azure mode only the first 10,000 characters of each text are sent to the check; the rest is not screened. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
 System prompts are constants in `backend/app/analysis/prompts.py`. The transcript is placed only in the user message, inside `<transcript>` tags. Partial analyses go inside `<partial_analyses>` and group summaries inside `<summaries>`. The system text says only the system message gives instructions, that the fenced text is untrusted data from user audio, and names patterns to never obey: "ignore previous instructions", "you are now ...", lines starting with `system:`, role-play, requests to reveal the prompt, requests for other users' data, and requests to change the output format. Such text is only content to summarize, and the output stays the JSON schema.
 
 Before wrapping, `backend/app/guardrails/markers.py` rewrites any copy of a reserved tag inside the data (any case, spaces allowed, `&lt;` forms too) as plain text, so `</transcript>` becomes `[/transcript]` and spoken text cannot close the block early. Tests cover the escaping, the rules in every system prompt, and an injection transcript staying inside the markers. A jailbreak sentence never appears in the system message.
 
-After transcription, and before any summary call, every transcript goes through the same content-safety check:
+After transcription, and before any summary call, every transcript goes through the same content-safety check. In Azure mode both calls send only the first 10,000 characters (`backend/app/guardrails/safety.py`), so the rest of a longer transcript is summarized without being screened. Saved choices, filter strings and chat text have the same cap.
 
 - Prompt Shields for jailbreak or prompt injection (Azure), or the jailbreak phrase list (mock).
 - Category analysis for violence, self-harm, hate, and sexual content. Azure blocks at `CONTENT_SAFETY_BLOCK_SEVERITY` (default 4). The mock provider uses the same decision shape with its phrase list.
@@ -178,5 +178,6 @@ Azure mode asks for a JSON object whose only field is `reply`, then validates it
 - Category lists in the mock are short on purpose. They are not a content policy.
 - Schema validation checks shape, not factual accuracy. A model can still omit a topic. The union step only preserves topics the chunk step already returned.
 - Blocked transcripts are stored because the user uploaded them. No summary or Analytics is produced for them, and they never reach the chat model. A retention policy for blocked text is future work.
+- In Azure mode the safety check reads only the first 10,000 characters of a text. A transcript longer than that is screened in part. Screening the rest needs a code change, for example one check per chunk.
 - The safety check reads the transcript, not the audio. This design does not scan audio for non-speech signals such as hidden ultrasonic content. Duration and RMS are the acoustic checks in this POC.
 - Speaker profiles are estimates from the audio, not identity facts.

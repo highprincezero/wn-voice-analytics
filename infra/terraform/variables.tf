@@ -36,7 +36,7 @@ variable "apim_user_rate_limit" {
 }
 
 variable "apim_anonymous_rate_limit" {
-  description = "Unauthenticated API Management calls per source IP per window."
+  description = "Unauthenticated API Management calls per client IP per window. The key is the X-Azure-ClientIP header that Front Door sets, or the caller IP when it is missing."
   type        = number
   default     = 60
 }
@@ -54,7 +54,7 @@ variable "worker_image" {
 }
 
 variable "regions" {
-  description = "One entry per region. The length of this list is N."
+  description = "One entry per region. The length of this list is N. openai_location must offer gpt-4o-transcribe (GlobalStandard) and gpt-5-mini (DataZoneStandard)."
   type = list(object({
     name            = string
     location        = string
@@ -70,7 +70,7 @@ variable "regions" {
       cidr            = "10.10.0.0/16"
       apps_subnet     = "10.10.0.0/23"
       data_subnet     = "10.10.2.0/24"
-      openai_location = "eastus"
+      openai_location = "eastus2"
     },
     {
       name            = "weu"
@@ -78,7 +78,7 @@ variable "regions" {
       cidr            = "10.20.0.0/16"
       apps_subnet     = "10.20.0.0/23"
       data_subnet     = "10.20.2.0/24"
-      openai_location = "westeurope"
+      openai_location = "swedencentral"
     },
   ]
 }

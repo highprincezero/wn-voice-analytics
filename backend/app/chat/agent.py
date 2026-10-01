@@ -182,7 +182,7 @@ def _profile_choice(message: str) -> dict | None:
     return {"intent": "profile", "tool_name": "profile_speaker", "arguments": arguments}
 
 
-# Mock-mode planner: keyword rules decide which tool to call and with what arguments.
+# Swaps in another fixed reply when the rule reply would repeat the last assistant turn.
 def _avoid_repeat(reply: str, history: list) -> str:
     previous = ""
     for item in reversed(history or []):
@@ -269,6 +269,9 @@ def _newest_file_choice(db: Session, user_id: uuid.UUID) -> dict | None:
     }
 
 
+# Rules planner: keyword rules decide which tool to call and with what arguments.
+# Mock mode uses it alone. Azure uses it when the planner call fails or picks no tool
+# for a clear summary request.
 def plan_with_rules(message: str) -> dict:
     if _asks_greeting(message):
         return {"intent": "greeting", "tool_name": "", "arguments": {}}
