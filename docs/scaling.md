@@ -154,7 +154,7 @@ flowchart TB
 
 ## Workers and context limits
 
-`CHUNK_CHARS` defaults to 4000 characters. A transcript up to that size is one structured call to `gpt-5-mini`. A longer transcript goes through map-reduce: it is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent, so text after about 80,000 characters is not summarized. Topics found on any chunk are unioned back in, so the reduce step cannot drop them. Duration is computed locally and is not part of the model context. Analytics is one call that reads the first 24,000 characters of the transcript (`TRANSCRIPT_LIMIT` in `llm_options.py`); the pace tool still counts every word.
+`CHUNK_CHARS` defaults to 4000 characters. A transcript up to that size is one structured call to `gpt-5-mini`. A longer transcript goes through map-reduce: it is split, each chunk is summarized with its own schema, and a reduce call merges them. At most `MAX_CHUNKS` (20) chunks are sent, so text after about 80,000 characters is not summarized. Topics found on any chunk are unioned back in, so the reduce step cannot drop them, up to 12 distinct items per list. Duration is computed locally and is not part of the model context. Analytics is one call that reads the first 24,000 characters of the transcript (`TRANSCRIPT_LIMIT` in `llm_options.py`); the pace tool still counts every word.
 
 Queues in each region:
 

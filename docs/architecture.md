@@ -151,7 +151,7 @@ Stores the file processing logs." }
   voiceDb --> tblChatSessions@{ shape: bow-rect, label: "Chat Sessions
 (A.1.9)
 [table:chat_sessions]
-Stores one chat for this account." }
+Stores each chat this account started." }
   voiceDb --> tblChatMessages@{ shape: bow-rect, label: "Chat Messages
 (A.1.10)
 [table:chat_messages]

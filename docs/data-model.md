@@ -111,7 +111,7 @@ erDiagram
 | `rollup_summaries` | Combined summary of completed recordings |
 | `group_reports` | The All groupings report: every grouping, code stats, and an AI summary per group |
 | `file_events` | The processing log |
-| `chat_sessions` | One chat for this account |
+| `chat_sessions` | One row per chat this account started. The screen reopens the latest |
 | `chat_messages` | The questions and answers in that chat |
 
 ## Rows
@@ -131,7 +131,7 @@ flowchart TB
   parts --> summaries["rollup_summaries. Table. Grouped summaries of completed recordings."]
   parts --> reports["group_reports. Table. All groupings reports."]
   parts --> events["file_events. Table. The processing log."]
-  parts --> chatSessions["chat_sessions. Table. One chat for this account."]
+  parts --> chatSessions["chat_sessions. Table. One row per chat this account started."]
   parts --> chatMessages["chat_messages. Table. The questions and answers in that chat."]
   person --> blob["Blob. File store. The audio, the transcript, and the analysis file."]
 ```

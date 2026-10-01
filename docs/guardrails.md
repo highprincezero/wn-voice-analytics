@@ -148,7 +148,7 @@ After the workflow finishes, Pydantic validates:
 
 An Insights schema failure marks the file `failed`. The bad payload is not shown as a successful analysis. A bad Analytics part does not fail the file; that option is stored as skipped.
 
-Map-reduce has a recall guard: topics found on any chunk are unioned with the reduced taxonomy. A reduce step cannot silently drop a topic that a chunk already extracted.
+Map-reduce has a recall guard: topics found on any chunk are unioned with the reduced taxonomy. A reduce step cannot silently drop a topic that a chunk already extracted, up to a cap: each of the three lists keeps at most 12 distinct items, the reduced ones first, so on a long recording with more topics the later ones are cut.
 
 ### 5. Authorization and rate limit
 
