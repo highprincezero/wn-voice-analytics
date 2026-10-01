@@ -169,6 +169,18 @@ docker compose run --rm --no-deps -T -v "$PWD:/repo" -w /repo/backend api \
   sh -c 'pip install -q --user -r requirements-dev.txt && python -m pytest -p no:cacheprovider'
 ```
 
+## Scalability design
+
+The multi-region setup is a design kept in the repo. It is not a running deployment, and the demo video does not cover it. The prototype runs on one machine with `docker compose up`.
+
+| Topic | Where |
+| --- | --- |
+| Multi-region design: request path, home region per account, sizing for N regions × 10,000 users and 2,000 concurrent each | [docs/scaling.md](docs/scaling.md): [Request 001](docs/scaling.md#request-001), [Plan numbers, each region](docs/scaling.md#plan-numbers-each-region) |
+| Block diagram of every service: gateway, auth, queues, workers, database, cache, storage, observability | [docs/architecture.md](docs/architecture.md#system) |
+| Database schema and object storage keys | [docs/data-model.md](docs/data-model.md), [Blob keys](docs/data-model.md#blob-keys) |
+| Infrastructure as code, one stack per region | [infra/terraform](infra/terraform) ([notes](infra/terraform/README.md)). Validated in CI (`fmt`, `init`, `validate`), not applied |
+| Model choice and justification | [docs/scaling.md: Data plane per region](docs/scaling.md#data-plane-per-region), [Why Azure](docs/scaling.md#why-azure), [Trade-offs](docs/scaling.md#trade-offs) |
+
 ## Azure
 
 This is a design plus Terraform. It is not a running multi-region deployment.
