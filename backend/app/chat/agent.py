@@ -317,7 +317,7 @@ def interpret_tool_message(message: dict) -> dict:
         return {"intent": "help", "tool_name": "", "arguments": {}}
     function = (calls[0] or {}).get("function") or {}
     name = str(function.get("name") or "")
-    # Allow-list check: only our three tools can ever be executed.
+    # Allow-list check: only our four tools can ever be executed.
     if name not in TOOL_NAMES:
         return {"intent": "help", "tool_name": "", "arguments": {}, "error": "unknown_tool"}
     # The model returns arguments as a JSON string, so decode it.

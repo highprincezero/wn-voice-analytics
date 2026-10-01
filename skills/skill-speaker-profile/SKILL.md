@@ -21,7 +21,7 @@ The chat agent runs this skill on demand through its `profile_speaker` tool. It 
 
 ## Who answers
 
-- `LLM_PROVIDER=azure`: the audio (up to about 4 MB) and the prompt below go to the `gpt-5-mini` chat deployment, then to the transcription deployment if that call fails. The reply must match a strict JSON schema. If every call fails, the acoustic fallback answers.
+- `LLM_PROVIDER=azure`: the code sends the audio (up to about 4 MB) and the prompt below to the `gpt-5-mini` chat deployment, then to the transcription deployment if that call fails. The reply must match a strict JSON schema. Voice-trait analysis needs an audio-input deployment. `gpt-5-mini` takes text and images, and `gpt-4o-transcribe` only transcribes, so with the current deployments both calls fail and the acoustic fallback answers.
 - Mock mode, and the fallback: `acoustic_profile()` in `backend/app/analysis/speaker_skill.py` measures duration and loudness only and says that age, accent, and style are not estimated.
 
 ## What it returns

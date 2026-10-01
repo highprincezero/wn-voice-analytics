@@ -90,7 +90,7 @@ Open http://localhost:8501. The logged-out caption says mock mode is on. Create 
 
 Upload the bundled sample from the assistant. Processing starts on its own. Analytics sits in a small box under the result.
 
-Pick which Analytics options run, and their settings (loudness window, top words shown, most items listed), in Analytics settings next to Summarize across files, or with `PUT /api/v1/prompts/config`. All seven run by default. Changes apply to new uploads.
+Pick which Analytics options run, and their settings (loudness window, top words shown, most items listed), in Analytics settings next to Summarize across files, or with `PUT /api/v1/prompts/config`. All seven run by default. Changes apply to the next analysis run: a new upload or Run again.
 
 Show activity log starts off. Turn it on to see the live log, then the activity list below it, newest turn first. Off hides both. The choice stays through processing and reruns, and `?activity=1` or `?activity=0` in the address keeps it after a new log-in. The side panel stays put while the chat scrolls. The chat input stays pinned to the bottom. The opening screen offers two replies: Summarize my calls and Upload a recording.
 
@@ -99,13 +99,14 @@ Show activity log starts off. Turn it on to see the live log, then the activity 
 | web | 8501 | Streamlit |
 | api | 8000 | FastAPI. Health: http://localhost:8000/api/v1/health |
 | postgres | 5432 | Database `voice`, and `langfuse` for traces. User `voice` |
-| redis | 6379 | 0 is the job queue. 2 is the rate limit and Langfuse |
+| redis | 6379 | 0 is the job queue. 1 holds Celery results. 2 is the rate limit and Langfuse |
 | worker | | Celery, including the schedule |
 | azurite | 10000 | Local blob store, container `voice` |
 | azurite-mcp | 8090 | `fetch_audio` for the transcription step |
 | langfuse-web | 3000 | Traces, when both keys are set (see Langfuse below). Names are in [Glossary](docs/glossary.md) |
+| langfuse-minio | 9090 | Langfuse event and media store |
 
-Optional dev tools: Redis Insight (5540), Azurite UI (8080), Flower (5555), pgAdmin (5050), and Dozzle (9999). They live in an override file that Compose loads on its own once it has the expected name (that name is git-ignored):
+Optional dev tools: Redis Insight (5540), Azurite UI (8080), Flower (5555), pgAdmin (5050), Dozzle (9999), and redis-watch (no port; `docker compose logs -f redis-watch` shows Celery queue activity). They live in an override file that Compose loads on its own once it has the expected name (that name is git-ignored):
 
 ```bash
 cp docker-compose.override.example.yml docker-compose.override.yml
@@ -146,7 +147,7 @@ LANGFUSE_HOST=http://langfuse-web:3000
 
 ### Tests
 
-Local tests need Python 3.12, the same version CI and the api image use, and `ffmpeg` on the PATH for the mp3 tests. Use a virtual environment (system Python on recent macOS and Linux refuses `pip install`):
+Local tests need Python 3.12, the same version CI and the api image use, and `ffmpeg` on the PATH for the compressed-audio tests (mp3, ogg, flac). Use a virtual environment (system Python on recent macOS and Linux refuses `pip install`):
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
@@ -156,7 +157,7 @@ ruff format --check backend frontend
 (cd backend && pytest)
 ```
 
-Plain `pytest` gives 153 passed and 1 skipped. The skipped one is the Postgres partition check, which needs `POSTGRES_TEST_URL`. If your `ffmpeg` cannot encode ogg (some Homebrew builds), the ogg upload test is skipped as well: 152 passed and 2 skipped. To run it against the Compose Postgres (stack up), create a separate test database first (run from the repo root). That gives 154 passed:
+Plain `pytest` gives 153 passed and 1 skipped. The skipped one is the Postgres partition check, which needs `POSTGRES_TEST_URL`. If your `ffmpeg` cannot encode ogg (some Homebrew builds), the compressed-audio duration and loudness test (mp3, ogg, flac in one test) is skipped as well: 152 passed and 2 skipped. To run it against the Compose Postgres (stack up), create a separate test database first (run from the repo root). That gives 154 passed:
 
 ```bash
 docker compose exec postgres createdb -U voice voice_test
@@ -247,7 +248,7 @@ Try it with curl against the local stack:
 ```bash
 API=http://localhost:8000/api/v1
 
-# Sign up (201). Password 8 to 72 bytes. A repeat email answers 409.
+# Sign up (201). Password at least 8 characters, at most 72 bytes. A repeat email answers 409.
 curl -s -X POST $API/auth/signup -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"alicepass123"}'
 
@@ -291,8 +292,12 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/reports` | yes | Recent reports |
 | GET | `/reports/{id}` | yes | One report and its status |
 | POST | `/chat` | yes | One question |
+| GET | `/chat/session` | yes | The latest chat and its saved turns |
+| POST | `/chat/session` | yes | Start an empty chat |
 | GET | `/health` | no | Liveness |
+| GET | `/health/ready` | no | Database check |
 | GET | `/meta` | no | Which providers are on |
+| GET | `http://localhost:8000/` (outside `/api/v1`) | no | Service name |
 
 ## Offline Collective Analysis
 
@@ -312,12 +317,12 @@ Summarize across files offers one summary at a time (trend per day, week, or mon
 
 **Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
 
-**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any LLM call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
 ### Guardrails for Layer 2
 
 - Filter parameters: the UI offers only fixed choices. The server does not trust the API and re-checks every request against the whitelist: unknown ids, out-of-range or wrongly typed params (for example `window_ms` 123), and extra fields are rejected with an error. Only fixed server-side prompt text reaches the LLM; user values are validated numbers.
-- Audio content: the content-safety check screens every transcript before any LLM. Blocked transcripts never reach the LLM or chat. Hardened prompts treat the transcript as untrusted data inside escaped markers. Output is schema-validated, and loudness and pace numbers come from server tools only.
+- Audio content: the content-safety check screens every transcript before any summary, Analytics, or chat model call. Blocked transcripts never reach the LLM or chat. Hardened prompts treat the transcript as untrusted data inside escaped markers. Output is schema-validated, and loudness and pace numbers come from server tools only.
 
 ## Worth knowing
 

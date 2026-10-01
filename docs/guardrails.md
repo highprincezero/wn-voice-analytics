@@ -29,8 +29,9 @@ flowchart LR
   words[Transcript] --> again[Same check]
   again -->|block| blocked[status blocked, transcript kept]
   again -->|clear| next[Insights, then Analytics]
-  shape[Model JSON] -->|bad shape| failed[status failed]
+  shape[Insights JSON] -->|bad shape| failed[status failed]
   shape -->|good| next
+  part[Analytics JSON part] -->|bad shape| skipped[that option stored as skipped]
 ```
 
 Which account a read or a chat tool uses.
@@ -84,7 +85,7 @@ The catalog today. Every option is a predefined prompt; the text lives in `LLM_O
 | `tone` | none | formal, casual, tense, friendly, or neutral, and a reason |
 | `key_entities` | `max_items` from 1 to 10 | People, organizations, and places |
 
-Users pick which options run, and their parameters, in the Analytics settings panel (next to Summarize across files) or with `PUT /api/v1/prompts/config`. All seven run at their defaults until a choice is saved, and an empty list also means all seven, so the panel asks for at least one. A saved choice applies to new uploads; unchecked options are skipped.
+Users pick which options run, and their parameters, in the Analytics settings panel (next to Summarize across files) or with `PUT /api/v1/prompts/config`. All seven run at their defaults until a choice is saved, and an empty list also means all seven, so the panel asks for at least one. A saved choice applies to the next analysis run, a new upload or Run again; unchecked options are skipped.
 
 **Layer 2 design choice.** Every Analytics option is a predefined prompt: a fixed instruction block on the server, keyed by the option id, injected into one `gpt-5-mini` call per file. The user only ticks options and sets typed parameters in the Analytics settings panel (the brief: "Users can select and configure the predefined prompt on the UI"); nobody types prompt text. For loudness and pace the model calls server tools (`measure_rms`, `measure_speaking_pace`) that compute exact numbers in code; the model adds a short interpretation. Nouns and adjectives, sentiment, action items, tone, and key entities come from the model, in a JSON schema built from only the ticked options. The code functions (RMS math, spaCy, a fixed word list) stay as the tools and as the mock-mode stand-in, so tests and the offline demo need no Azure.
 
@@ -101,7 +102,7 @@ Filter parameters:
 
 Audio content:
 
-- The content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) screens the transcript before any LLM call.
+- The content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) screens the transcript before any summary, Analytics, or chat model call.
 - Blocked transcripts never reach the LLM or chat. Insights and Analytics are skipped.
 - Hardened system prompts treat the transcript as untrusted data inside escaped `<transcript>` markers, name common injection patterns, and never follow commands in it.
 - Output is a strict JSON schema built from the ticked options, then validated again on the server. A bad or missing part is stored as skipped, never as a result.
@@ -117,11 +118,11 @@ The All groupings report (`POST /api/v1/reports`) takes only whitelisted `groupi
 
 Before a configuration is stored, the server serializes the cleaned options and runs content safety on that string. Azure mode calls Azure AI Content Safety `text:shieldPrompt` (Prompt Shields) and `text:analyze`. Mock mode, used locally and in tests, checks a fixed phrase list: jailbreak phrases such as "ignore previous instructions" and a small set of high-severity phrases. A hit returns HTTP 400 and nothing is saved.
 
-The same check runs on the custom filter string.
+Prompt Shields (in mock mode, the jailbreak phrase list) runs on the custom filter string. The harm categories are not checked there.
 
 ### 3. The transcript is data, not instructions
 
-**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any LLM call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
+**Audio guardrails.** Every transcript goes through a content-safety check (Azure AI Content Safety Prompt Shields; a fixed phrase list in local mock mode) that blocks before any summary, Analytics, or chat model call. Behind it, the system prompts name common injection patterns and say never to obey them, and transcripts, summaries, and tool results are fenced in fixed tags as untrusted data.
 
 System prompts are constants in `backend/app/analysis/prompts.py`. The transcript is placed only in the user message, inside `<transcript>` tags. Partial analyses go inside `<partial_analyses>` and group summaries inside `<summaries>`. The system text says only the system message gives instructions, that the fenced text is untrusted data from user audio, and names patterns to never obey: "ignore previous instructions", "you are now ...", lines starting with `system:`, role-play, requests to reveal the prompt, requests for other users' data, and requests to change the output format. Such text is only content to summarize, and the output stays the JSON schema.
 
@@ -130,7 +131,7 @@ Before wrapping, `backend/app/guardrails/markers.py` rewrites any copy of a rese
 After transcription, and before any summary call, every transcript goes through the same content-safety check:
 
 - Prompt Shields for jailbreak or prompt injection (Azure), or the jailbreak phrase list (mock).
-- Category analysis for violence, self-harm, and hate. Azure blocks at `CONTENT_SAFETY_BLOCK_SEVERITY` (default 4). The mock provider uses the same decision shape with its phrase list.
+- Category analysis for violence, self-harm, hate, and sexual content. Azure blocks at `CONTENT_SAFETY_BLOCK_SEVERITY` (default 4). The mock provider uses the same decision shape with its phrase list.
 
 If the check blocks, the file status becomes `blocked`, the reason is stored, the transcript is kept for the user's own record, and the workflow skips both Insights (Layer 1) and Analytics (Layer 2).
 
@@ -145,7 +146,7 @@ After the workflow finishes, Pydantic validates:
 - `taxonomy` has `professional_topics`, `personal_topics`, and `upcoming_events`, each a list of strings.
 - Layer 2 objects only use the known option keys.
 
-A schema failure marks the file `failed`. The bad payload is not shown as a successful analysis.
+An Insights schema failure marks the file `failed`. The bad payload is not shown as a successful analysis. A bad Analytics part does not fail the file; that option is stored as skipped.
 
 Map-reduce has a recall guard: topics found on any chunk are unioned with the reduced taxonomy. A reduce step cannot silently drop a topic that a chunk already extracted.
 

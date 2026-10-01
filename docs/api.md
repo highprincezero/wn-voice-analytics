@@ -2,7 +2,7 @@
 
 API means application programming interface.
 
-`http://localhost:8000` under `/api/v1`.
+`http://localhost:8000` under `/api/v1`. The one exception is `GET /`, which sits at the root.
 
 ## Names
 
@@ -15,7 +15,7 @@ API means application programming interface.
 | ID | identifier |
 | Bearer | sign-in token on `Authorization` |
 | 201 | created |
-| 401 | the password did not match |
+| 401 | wrong email or password, or a missing, invalid, or expired token |
 | 400 | the request was rejected |
 | 404 | missing, including another account's file |
 | 409 | that email already exists |
@@ -79,7 +79,7 @@ curl -s -X POST $API/chat -H "Authorization: Bearer $TOKEN" -H 'Content-Type: ap
 | GET | `/health` | no | Liveness |
 | GET | `/health/ready` | no | Database check |
 | GET | `/meta` | no | Which providers are on |
-| GET | `/` | no | Service name |
+| GET | `http://localhost:8000/` (outside `/api/v1`) | no | Service name |
 
 The order of work after an upload.
 
@@ -100,7 +100,7 @@ flowchart LR
 
 | | |
 | --- | --- |
-| Password | 8 to 72 bytes |
+| Password | at least 8 characters, at most 72 bytes |
 | Upload | field `files`, up to 10, 20 MB, `wav` `mp3` `m4a` `ogg` `flac` |
 | Chat `message` | 1 to 2,000 characters |
 | Chat `history` | at most 8, role `user` or `assistant` |

@@ -1732,7 +1732,7 @@ def _analysis_facts(record: dict, clip: tuple[bytes, str] | None) -> list[tuple[
     elif status:
         tone = "ok" if status == "completed" else "bad" if status in {"failed", "blocked"} else ""
         facts.append(("Status", _STATUS_TEXT.get(status, _nice(status)), tone))
-    # The server stores 0 when it could not measure the audio (it only reads WAV);
+    # The server stores 0 when it could not decode the audio;
     # fall back to the file header, and leave the duration out rather than show "0:00".
     seconds = float(record.get("duration_sec") or 0)
     if seconds <= 0:

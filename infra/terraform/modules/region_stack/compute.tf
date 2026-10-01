@@ -55,6 +55,10 @@ resource "azurerm_container_app" "api" {
     name  = "redis-url"
     value = local.redis_url
   }
+  secret {
+    name  = "appinsights-connection"
+    value = azurerm_application_insights.this.connection_string
+  }
 
   template {
     min_replicas = 2
@@ -143,6 +147,10 @@ resource "azurerm_container_app" "api" {
         value = "voice-analytics-api-${var.region_name}"
       }
       env {
+        name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        secret_name = "appinsights-connection"
+      }
+      env {
         name        = "REDIS_URL"
         secret_name = "redis-url"
       }
@@ -212,6 +220,10 @@ resource "azurerm_container_app" "worker" {
   secret {
     name  = "safety-key"
     value = azurerm_cognitive_account.safety.primary_access_key
+  }
+  secret {
+    name  = "appinsights-connection"
+    value = azurerm_application_insights.this.connection_string
   }
 
   template {
@@ -293,6 +305,10 @@ resource "azurerm_container_app" "worker" {
         name  = "OTEL_SERVICE_NAME"
         value = "voice-analytics-worker-${var.region_name}"
       }
+      env {
+        name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        secret_name = "appinsights-connection"
+      }
     }
   }
 }
@@ -315,6 +331,14 @@ resource "azurerm_container_app_job" "rollup" {
     name  = "database-url"
     value = local.database_url
   }
+  secret {
+    name  = "openai-key"
+    value = azurerm_cognitive_account.openai.primary_access_key
+  }
+  secret {
+    name  = "appinsights-connection"
+    value = azurerm_application_insights.this.connection_string
+  }
 
   template {
     container {
@@ -333,8 +357,24 @@ resource "azurerm_container_app_job" "rollup" {
         value = "azure"
       }
       env {
+        name  = "AZURE_OPENAI_ENDPOINT"
+        value = azurerm_cognitive_account.openai.endpoint
+      }
+      env {
+        name        = "AZURE_OPENAI_API_KEY"
+        secret_name = "openai-key"
+      }
+      env {
+        name  = "AZURE_OPENAI_CHAT_DEPLOYMENT"
+        value = azurerm_cognitive_deployment.chat.name
+      }
+      env {
         name  = "HOME_REGION"
         value = var.region_name
+      }
+      env {
+        name        = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        secret_name = "appinsights-connection"
       }
     }
   }

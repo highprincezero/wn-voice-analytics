@@ -23,7 +23,7 @@
 | vCPU | virtual central processing unit |
 | HA | high availability. PostgreSQL standby in another zone |
 | GZRS | geo-zone-redundant storage. Blob copied across zones and to the paired region |
-| RMS | root mean square. Loudness on 16-bit wav |
+| RMS | root mean square. Loudness on the decoded audio |
 
 ## Langfuse trace names
 
@@ -44,7 +44,7 @@ Model calls have one name with `LLM_PROVIDER=azure` and another in mock mode, wh
 | --- | --- |
 | workflow.build | The workflow is assembled before it runs. |
 | workflow.run | One run of the workflow. |
-| executor.process prepare | Measure duration, and whether the file is a wav. |
+| executor.process prepare | Measure duration, and whether the audio could be decoded. |
 | executor.process transcribe | Speech to text. |
 | executor.process shield | Content safety check. A block skips Insights and Analytics. |
 | executor.process layer1 | Insights. A short transcript writes AudioLayer1. A long one writes AudioChunk, then AudioReduce. |
