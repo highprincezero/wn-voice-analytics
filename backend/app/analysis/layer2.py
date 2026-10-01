@@ -15,7 +15,7 @@ def run_layer2(
         params = option.get("params") or {}
         if option_id == "rms_energy":
             if not wav_ok:
-                result[option_id] = {"skipped": "wav_pcm16_required"}
+                result[option_id] = {"skipped": "audio_decode_failed"}
             else:
                 result[option_id] = rms_features(audio, int(params["window_ms"]))
         elif option_id == "pos_counts":
